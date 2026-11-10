@@ -8,13 +8,13 @@
   :root {
     --bg: #f5f6f8; --card: #ffffff; --text: #16181d; --muted: #667085; --line: #e3e6eb;
     --accent: #2f5bd8; --accent-soft: #e8eefc; --good: #0f8a4f; --good-soft: #e3f5ea;
-    --bad: #c9352b; --bad-soft: #fbe9e7; --warn: #8a5a00; --warn-soft: #fff3d6;
+    --bad: #c9352b; --bad-soft: #fbe9e7; --warn: #8a5a00; --warn-soft: #fff3d6; --alt: #b4690e;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #0f1115; --card: #181b21; --text: #e8eaee; --muted: #98a1b0; --line: #2a2f38;
       --accent: #7c9cf5; --accent-soft: #1f2a47; --good: #4cc38a; --good-soft: #15301f;
-      --bad: #f0776c; --bad-soft: #3a1c19; --warn: #f2c14e; --warn-soft: #3a2e10;
+      --bad: #f0776c; --bad-soft: #3a1c19; --warn: #f2c14e; --warn-soft: #3a2e10; --alt: #e0a458;
     }
   }
   * { box-sizing: border-box; }
@@ -24,6 +24,7 @@
   header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
   h1 { font-size: 20px; margin: 0; }
   h2 { font-size: 16px; margin: 0 0 12px; }
+  h3 { font-size: 13px; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
   .sub { color: var(--muted); font-size: 13px; }
   .num { font-variant-numeric: tabular-nums; }
   button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
@@ -37,6 +38,7 @@
   .banner.warn { background: var(--warn-soft); color: var(--warn); }
   .banner.err { background: var(--bad-soft); color: var(--bad); }
   .banner.ok { background: var(--good-soft); color: var(--good); }
+  .banner.info { background: var(--accent-soft); color: var(--accent); }
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 16px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
   .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -61,7 +63,7 @@
   .chip.sell { background: var(--bad-soft); color: var(--bad); }
   .chip.held { background: var(--accent-soft); color: var(--accent); }
   .chip.no { background: var(--line); color: var(--muted); }
-  .bar { position: relative; width: 150px; height: 8px; background: var(--line); border-radius: 4px; }
+  .bar { position: relative; width: 120px; height: 8px; background: var(--line); border-radius: 4px; }
   .bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--muted); }
   .bar.hit i { background: var(--good); }
   .bar b { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); }
@@ -73,17 +75,22 @@
   .rules .t { flex: 1 1 200px; }
   .rules .v { color: var(--muted); margin-left: auto; padding-left: 12px; }
   canvas { width: 100%; height: 240px; display: block; }
-  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); margin-top: 6px; }
   .legend i { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 6px; }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px 18px; }
   label { display: block; font-size: 13px; color: var(--muted); }
+  label.check { display: flex; gap: 8px; align-items: center; color: var(--text); font-size: 14px; }
+  label.check input { width: auto; margin: 0; }
   input, textarea, select { width: 100%; margin-top: 4px; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
   textarea { min-height: 84px; resize: vertical; }
+  fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 0; min-width: 0; }
+  legend { padding: 0 6px; font-size: 13px; font-weight: 600; }
   .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
   .stack > * + * { margin-top: 14px; }
   footer { margin-top: 28px; color: var(--muted); font-size: 12px; }
   ul.notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -121,7 +128,7 @@
 
   <section id="tab-senales">
     <div class="card">
-      <h2>Condiciones por ticker</h2>
+      <h2 id="signals-title">Señales</h2>
       <div class="sub" id="signals-note"></div>
       <div class="scroll" id="signals" style="margin-top:10px"></div>
     </div>
@@ -136,19 +143,20 @@
 
   <section id="tab-backtest" class="stack">
     <div class="card">
-      <h2>¿Cómo habrían funcionado estas reglas en el pasado?</h2>
+      <h2>¿Cómo habría funcionado en el pasado?</h2>
       <div class="row" style="margin-top:0">
         <label style="width:150px">Periodo
           <select id="bt-years">
-            <option value="1">1 año</option><option value="3" selected>3 años</option>
-            <option value="5">5 años</option><option value="10">10 años</option>
+            <option value="1">1 año</option><option value="3">3 años</option>
+            <option value="5" selected>5 años</option><option value="10">10 años</option>
           </select>
         </label>
         <button id="btn-backtest" style="align-self:flex-end">Ejecutar backtest</button>
       </div>
       <ul class="notes">
+        <li>Compara tu estrategia actual, la otra estrategia y simplemente comprar el índice y no tocarlo.</li>
         <li>Decide con el cierre de cada día y ejecuta a la apertura del día siguiente.</li>
-        <li>Usa los tickers que existen hoy (sesgo de supervivencia): el resultado real habría sido peor.</li>
+        <li>Usa los tickers que existen hoy, elegidos sabiendo cuáles han ido bien: el resultado real habría sido peor.</li>
         <li>Un buen resultado pasado no garantiza nada sobre el futuro.</li>
       </ul>
     </div>
@@ -159,25 +167,63 @@
     <div class="card">
       <h2>Ajustes del bot</h2>
       <form id="settings-form" class="stack">
+        <label>Estrategia
+          <select name="strategy">
+            <option value="rotation">Rotación mensual: mantener los tickers más fuertes (recomendada)</option>
+            <option value="checklist">Lista de condiciones: comprar cuando se cumple casi todo</option>
+          </select>
+        </label>
         <label>Tickers a vigilar (separados por comas o espacios)
           <textarea name="universe" spellcheck="false"></textarea>
         </label>
-        <div class="grid2">
-          <label>Importe de cada compra ($)<input name="position_size" type="number" step="any"></label>
-          <label>Máximo de posiciones abiertas<input name="max_positions" type="number" step="1"></label>
-          <label>Comprar si se cumple al menos (% de condiciones)<input name="buy_threshold_pct" type="number" step="any"></label>
-          <label>Vender si las condiciones bajan de (%)<input name="exit_score_pct" type="number" step="any"></label>
-          <label>Stop-loss (% de pérdida máxima)<input name="stop_loss_pct" type="number" step="any"></label>
-          <label>Trailing stop (% desde el máximo; 0 = no)<input name="trailing_stop_pct" type="number" step="any"></label>
-          <label>Objetivo de beneficio (%; 0 = no)<input name="take_profit_pct" type="number" step="any"></label>
-          <label>Comisión simulada por operación (%)<input name="fee_pct" type="number" step="any"></label>
-          <label>Capital inicial ($; se aplica al reiniciar)<input name="initial_cash" type="number" step="any"></label>
-        </div>
+
+        <fieldset><legend>Cartera</legend>
+          <div class="grid2">
+            <label>Máximo de posiciones abiertas<input name="max_positions" type="number" step="1"></label>
+            <label>Tamaño de cada compra
+              <select name="sizing_mode">
+                <option value="percent">Un % del valor de la cartera (reinvierte ganancias)</option>
+                <option value="fixed">Un importe fijo</option>
+              </select>
+            </label>
+            <label data-sizing="percent">% de la cartera por compra<input name="position_pct" type="number" step="any"></label>
+            <label data-sizing="fixed">Importe de cada compra ($)<input name="position_size" type="number" step="any"></label>
+            <label>Comisión simulada por operación (%)<input name="fee_pct" type="number" step="any"></label>
+            <label>Capital inicial ($; se aplica al reiniciar)<input name="initial_cash" type="number" step="any"></label>
+            <label>Tus gastos mensuales ($: servidor, datos…)<input name="monthly_cost" type="number" step="any"></label>
+            <label>Índice de referencia<input name="benchmark" spellcheck="false"></label>
+          </div>
+        </fieldset>
+
+        <fieldset data-strategy="rotation"><legend>Rotación mensual</legend>
+          <div class="grid2">
+            <label>Condiciones mínimas para estar en cartera (%; 0 = sin mínimo)<input name="rotation_min_score_pct" type="number" step="any"></label>
+            <label class="check"><input name="trend_filter" type="checkbox">Solo tickers por encima de su media de 200 días</label>
+          </div>
+        </fieldset>
+
+        <fieldset data-strategy="checklist"><legend>Lista de condiciones</legend>
+          <div class="grid2">
+            <label>Comprar si se cumple al menos (% de condiciones)<input name="buy_threshold_pct" type="number" step="any"></label>
+            <label>Vender si las condiciones bajan de (%)<input name="exit_score_pct" type="number" step="any"></label>
+          </div>
+        </fieldset>
+
+        <fieldset><legend>Protección</legend>
+          <div class="grid2">
+            <label>Stop-loss (% de pérdida máxima por posición)<input name="stop_loss_pct" type="number" step="any"></label>
+            <label>Trailing stop (% desde el máximo; 0 = no)<input name="trailing_stop_pct" type="number" step="any"></label>
+            <label>Objetivo de beneficio (%; 0 = no)<input name="take_profit_pct" type="number" step="any"></label>
+            <label class="check"><input name="market_filter" type="checkbox">No comprar si el índice está bajo su media de 200 días</label>
+          </div>
+        </fieldset>
+
         <div class="row">
           <button class="primary" type="submit">Guardar ajustes</button>
           <button class="danger" type="button" id="btn-reset">Reiniciar cuenta ficticia</button>
           <span class="sub" id="settings-msg"></span>
         </div>
+        <div class="sub" id="telegram-note"></div>
       </form>
     </div>
   </section>
@@ -200,6 +246,7 @@ const when = (ts) => {
   if (ts.length <= 10) return ts;
   return new Date(ts).toLocaleString("es-ES", {dateStyle: "short", timeStyle: "short"});
 };
+const STRATEGY = {rotation: "rotación mensual", checklist: "lista de condiciones"};
 
 let state = null;
 let openSignal = null;
@@ -222,7 +269,8 @@ function drawChart(canvas, series, labels) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
   const all = series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
-  if (Math.max(...series.map((s) => s.values.length)) < 2) {
+  const n = Math.max(0, ...series.map((s) => s.values.length));
+  if (n < 2 || !all.length) {
     ctx.fillStyle = css.getPropertyValue("--muted"); ctx.font = "13px system-ui"; ctx.textAlign = "center";
     ctx.fillText("Aún no hay suficientes datos para dibujar el gráfico", w / 2, h / 2);
     return;
@@ -231,8 +279,7 @@ function drawChart(canvas, series, labels) {
   if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
   const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
   const L = 64, R = 10, T = 10, B = 24;
-  const n = Math.max(...series.map((s) => s.values.length));
-  const x = (i) => L + (w - L - R) * (n === 1 ? 0 : i / (n - 1));
+  const x = (i) => L + (w - L - R) * (i / (n - 1));
   const y = (v) => T + (h - T - B) * (1 - (v - lo) / (hi - lo));
   ctx.font = "11px system-ui"; ctx.fillStyle = css.getPropertyValue("--muted");
   ctx.strokeStyle = css.getPropertyValue("--line"); ctx.lineWidth = 1;
@@ -251,7 +298,11 @@ function drawChart(canvas, series, labels) {
     ctx.strokeStyle = css.getPropertyValue(s.color); ctx.lineWidth = s.width || 2;
     ctx.setLineDash(s.dash || []);
     ctx.beginPath();
-    s.values.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+    let started = false;
+    s.values.forEach((v, i) => {
+      if (!Number.isFinite(v)) return;
+      if (started) ctx.lineTo(x(i), y(v)); else { ctx.moveTo(x(i), y(v)); started = true; }
+    });
     ctx.stroke();
   }
   ctx.setLineDash([]);
@@ -264,50 +315,61 @@ function kpi(label, value, extra, klass) {
 }
 
 function renderHeader() {
-  const lc = state.last_cycle;
+  const lc = state.last_cycle, s = state.settings;
   const source = state.provider === "yahoo" ? "Yahoo Finance" : "datos simulados";
   const auto = state.auto_cycle_minutes > 0 ? ` · análisis automático cada ${state.auto_cycle_minutes} min` : "";
-  $("status").textContent = (lc ? `Último análisis: ${when(lc.ts)}` : "Todavía no se ha hecho ningún análisis") +
-    ` · fuente: ${source}${auto}`;
+  let rot = "";
+  if (s.strategy === "rotation") {
+    rot = state.rebalance_pending ? " · rotación de este mes pendiente" : " · próxima rotación: primera sesión del mes que viene";
+  }
+  $("status").textContent = `Estrategia: ${STRATEGY[s.strategy]}${rot} · ` +
+    (lc ? `último análisis: ${when(lc.ts)}` : "todavía sin análisis") + ` · fuente: ${source}${auto}`;
   let html = "";
   if (state.provider !== "yahoo") {
     html += `<div class="banner warn"><b>Modo de prueba:</b> los precios son inventados, no son del mercado real.
       Arranca la aplicación sin <code>DATA_PROVIDER=synthetic</code> para usar datos reales.</div>`;
   }
   if (flash) html += `<div class="banner ${flash.kind}">${flash.html}</div>`;
+  for (const note of (lc && lc.notes) || []) html += `<div class="banner info">${esc(note)}</div>`;
   const errors = lc ? Object.entries(lc.errors || {}) : [];
   if (errors.length) {
     html += `<div class="banner err"><b>Sin datos para ${errors.length} ticker(s):</b> ` +
-      errors.slice(0, 6).map(([s, e]) => `${esc(s)} (${esc(e)})`).join("; ") + (errors.length > 6 ? "…" : "") + `</div>`;
+      errors.slice(0, 6).map(([t, e]) => `${esc(t)} (${esc(e)})`).join("; ") + (errors.length > 6 ? "…" : "") + `</div>`;
   }
   $("banners").innerHTML = html;
 }
 
 function renderKpis() {
   const a = state.account, s = state.settings;
-  $("kpis").innerHTML =
+  const size = s.sizing_mode === "percent" ? `${s.position_pct} % por compra` : `${money(s.position_size)} por compra`;
+  let html =
     kpi("Valor total", money(a.equity), `Capital inicial ${money(a.initial_cash)}`) +
-    kpi("Ganancia / pérdida", signedMoney(a.pnl), pct(a.pnl_pct), cls(a.pnl)) +
+    kpi("Ganancia / pérdida", signedMoney(a.pnl), pct(a.pnl_pct), cls(a.pnl));
+  if (s.monthly_cost > 0) {
+    html += kpi("Tras tus gastos", signedMoney(a.net_pnl), `Gastos acumulados ${money(a.costs_to_date)}`, cls(a.net_pnl));
+  }
+  html +=
     kpi("Efectivo disponible", money(a.cash), `Invertido ${money(a.invested)}`) +
     kpi("Ya realizado (ventas)", signedMoney(a.realized_pnl), `Latente ${signedMoney(a.unrealized_pnl)}`, cls(a.realized_pnl)) +
-    kpi("Posiciones", `${state.positions.length} / ${s.max_positions}`, `${money(s.position_size)} por compra`);
+    kpi("Posiciones", `${state.positions.length} / ${s.max_positions}`, size);
+  $("kpis").innerHTML = html;
 }
 
 function renderPositions() {
   if (!state.positions.length) {
-    $("positions").innerHTML = `<div class="empty">Sin posiciones. El bot solo compra cuando un ticker cumple al menos el
-      ${state.settings.buy_threshold_pct} % de las condiciones.</div>`;
+    $("positions").innerHTML = `<div class="empty">Sin posiciones todavía. ${state.settings.strategy === "rotation"
+      ? "El bot entra en la primera sesión de bolsa tras arrancar y después rota una vez al mes."
+      : `El bot solo compra cuando un ticker cumple al menos el ${state.settings.buy_threshold_pct} % de las condiciones.`}</div>`;
     return;
   }
   $("positions").innerHTML = `<table><thead><tr>
     <th>Ticker</th><th class="r">Cantidad</th><th class="r">Precio compra</th><th class="r">Precio actual</th>
-    <th class="r">Valor</th><th class="r">Gan./pérd.</th><th class="r">%</th><th class="r">Condic. al comprar</th><th>Comprado</th>
+    <th class="r">Valor</th><th class="r">Gan./pérd.</th><th class="r">%</th><th>Comprado</th>
     </tr></thead><tbody>` + state.positions.map((p) => `<tr>
       <td><b>${esc(p.symbol)}</b></td><td class="r num">${p.qty.toFixed(4)}</td>
       <td class="r num">${money(p.avg_price)}</td><td class="r num">${money(p.last_price)}</td>
       <td class="r num">${money(p.value)}</td><td class="r num ${cls(p.pnl)}">${signedMoney(p.pnl)}</td>
-      <td class="r num ${cls(p.pnl)}">${pct(p.pnl_pct)}</td><td class="r num">${p.entry_score.toFixed(0)} %</td>
-      <td>${when(p.opened_at)}</td></tr>`).join("") + `</tbody></table>`;
+      <td class="r num ${cls(p.pnl)}">${pct(p.pnl_pct)}</td><td>${when(p.opened_at)}</td></tr>`).join("") + `</tbody></table>`;
 }
 
 function renderEquity() {
@@ -323,30 +385,49 @@ function renderEquity() {
 }
 
 function renderSignals() {
-  const thr = state.settings.buy_threshold_pct;
+  const s = state.settings, rot = s.strategy === "rotation";
+  const thr = rot ? s.rotation_min_score_pct : s.buy_threshold_pct;
   const held = new Set(state.positions.map((p) => p.symbol));
-  $("signals-note").textContent = state.signals.length
-    ? `El bot compra solo si se cumple al menos el ${thr} % de las condiciones (la marca vertical). Pulsa una fila para ver el detalle.`
-    : "";
+  $("signals-title").textContent = rot ? "Ranking de fuerza (momentum)" : "Condiciones por ticker";
   if (!state.signals.length) {
+    $("signals-note").textContent = "";
     $("signals").innerHTML = `<div class="empty">Pulsa «Analizar ahora» para evaluar los tickers.</div>`;
     return;
   }
-  $("signals").innerHTML = `<table><thead><tr><th>Ticker</th><th class="r">Precio</th><th>Condiciones cumplidas</th>
-    <th class="r"></th><th>Estado</th></tr></thead><tbody>` + state.signals.map((g) => {
+  $("signals-note").textContent = rot
+    ? `Cada mes el bot se queda con los ${s.max_positions} tickers de mayor momentum (media de la rentabilidad a 3, 6 y 12 meses)` +
+      (s.rotation_min_score_pct > 0 ? ` que cumplan al menos el ${thr} % de las condiciones (marca vertical)` : "") +
+      (s.trend_filter ? " y estén sobre su media de 200 días" : "") + ". Pulsa una fila para ver las condiciones."
+    : `El bot compra solo si se cumple al menos el ${thr} % de las condiciones (la marca vertical). Pulsa una fila para ver el detalle.`;
+  const order = (g) => (rot ? (g.rank ?? 1e6) - (g.mom ?? -9) * 1e-3 : -(g.score_pct ?? -1));
+  const signals = [...state.signals].sort((a, b) => order(a) - order(b) || a.symbol.localeCompare(b.symbol));
+
+  $("signals").innerHTML = `<table><thead><tr><th>${rot ? "Puesto" : ""}</th><th>Ticker</th><th class="r">Precio</th>
+    <th class="r">Momentum</th><th>Condiciones</th><th class="r"></th><th>Estado</th></tr></thead><tbody>` + signals.map((g) => {
     if (g.score_pct === null) {
-      return `<tr><td><b>${esc(g.symbol)}</b></td><td class="r num">${g.price === null ? "—" : money(g.price)}</td>
-        <td colspan="2" class="sub">${esc(g.status)}</td><td><span class="chip no">Sin evaluar</span></td></tr>`;
+      return `<tr><td></td><td><b>${esc(g.symbol)}</b></td><td class="r num">${g.price === null ? "—" : money(g.price)}</td>
+        <td colspan="3" class="sub">${esc(g.status)}</td><td><span class="chip no">Sin evaluar</span></td></tr>`;
     }
     const hit = g.score_pct >= thr - 1e-9;
-    const chip = held.has(g.symbol) ? `<span class="chip held">En cartera</span>`
-      : hit ? `<span class="chip buy">Cumple: compra</span>` : `<span class="chip no">No cumple</span>`;
-    let row = `<tr class="sig" data-symbol="${esc(g.symbol)}"><td><b>${esc(g.symbol)}</b></td>
-      <td class="r num">${money(g.price)}</td>
-      <td><div class="bar ${hit ? "hit" : ""}"><i style="width:${g.score_pct}%"></i><b style="left:${thr}%"></b></div></td>
-      <td class="r num">${g.passed}/${g.total} · ${g.score_pct.toFixed(0)} %</td><td>${chip}</td></tr>`;
+    let chip;
+    if (rot) {
+      const why = g.rank ? `puesto ${g.rank}` : g.mom === null ? "sin historia de 12 meses"
+        : !g.trend_ok && s.trend_filter ? "bajo su media de 200 días" : "pocas condiciones";
+      chip = held.has(g.symbol)
+        ? `<span class="chip held">En cartera</span>` + (g.target ? "" : ` <span class="sub">sale en la próxima rotación</span>`)
+        : g.target ? `<span class="chip buy">Entra en la próxima rotación</span>`
+        : `<span class="chip no">Fuera</span> <span class="sub">${why}</span>`;
+    } else {
+      chip = held.has(g.symbol) ? `<span class="chip held">En cartera</span>`
+        : hit ? `<span class="chip buy">Cumple: compra</span>` : `<span class="chip no">No cumple</span>`;
+    }
+    let row = `<tr class="sig" data-symbol="${esc(g.symbol)}"><td class="num sub">${rot && g.rank ? "#" + g.rank : ""}</td>
+      <td><b>${esc(g.symbol)}</b></td><td class="r num">${money(g.price)}</td>
+      <td class="r num ${g.mom === null ? "" : cls(g.mom)}">${g.mom === null ? "—" : pct(g.mom * 100, 1)}</td>
+      <td><div class="bar ${hit ? "hit" : ""}"><i style="width:${g.score_pct}%"></i>${thr > 0 ? `<b style="left:${thr}%"></b>` : ""}</div></td>
+      <td class="r num">${g.passed}/${g.total}</td><td>${chip}</td></tr>`;
     if (openSignal === g.symbol) {
-      row += `<tr class="detail"><td colspan="5"><ul class="rules">` + g.results.map((r) =>
+      row += `<tr class="detail"><td colspan="7"><ul class="rules">` + g.results.map((r) =>
         `<li><span class="${r.passed ? "pos" : "neg"}">${r.passed ? "✓" : "✗"}</span><span class="t">${esc(r.label)}</span>
          <span class="v num">${esc(r.value)}</span></li>`).join("") + `</ul></td></tr>`;
     }
@@ -370,12 +451,23 @@ function renderTrades() {
     : `<div class="empty">Todavía no hay operaciones.</div>`;
 }
 
+function syncFormVisibility() {
+  const f = $("settings-form");
+  f.querySelectorAll("[data-strategy]").forEach((el) => el.classList.toggle("hidden", el.dataset.strategy !== f.elements.strategy.value));
+  f.querySelectorAll("[data-sizing]").forEach((el) => el.classList.toggle("hidden", el.dataset.sizing !== f.elements.sizing_mode.value));
+}
+
 function fillSettings() {
   const f = $("settings-form"), s = state.settings;
   for (const el of f.elements) {
     if (!el.name) continue;
-    el.value = el.name === "universe" ? s.universe.join(", ") : s[el.name];
+    if (el.type === "checkbox") el.checked = !!s[el.name];
+    else el.value = el.name === "universe" ? s.universe.join(", ") : s[el.name];
   }
+  syncFormVisibility();
+  $("telegram-note").textContent = state.telegram
+    ? "Alertas de Telegram activadas: recibirás un mensaje con cada compra y venta."
+    : "Alertas de Telegram sin configurar (ver README: variables TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID).";
 }
 
 function render(refillForm) {
@@ -410,9 +502,10 @@ $("btn-cycle").addEventListener("click", async () => {
   btn.disabled = true; btn.textContent = "Analizando…";
   try {
     const r = await api("/api/cycle", {method: "POST"});
-    const parts = [`${r.evaluated} tickers evaluados`, `${r.qualified} cumplen el umbral`];
-    parts.push(r.buys.length ? `compras: ${r.buys.map(esc).join(", ")}` : "sin compras");
-    parts.push(r.sells.length ? `ventas: ${r.sells.map((s) => esc(s.symbol)).join(", ")}` : "sin ventas");
+    const parts = [`${r.evaluated} tickers evaluados`];
+    if (r.rebalanced) parts.push("rotación mensual hecha");
+    parts.push(r.buys.length ? `compras: ${r.buys.map((b) => esc(b.symbol)).join(", ")}` : "sin compras");
+    parts.push(r.sells.length ? `ventas: ${r.sells.map((x) => esc(x.symbol)).join(", ")}` : "sin ventas");
     flash = {kind: "ok", html: "Análisis completado · " + parts.join(" · ")};
   } catch (err) {
     flash = {kind: "err", html: "No se pudo completar el análisis: " + esc(err.message)};
@@ -421,9 +514,13 @@ $("btn-cycle").addEventListener("click", async () => {
   await refresh(false);
 });
 
+$("settings-form").addEventListener("change", syncFormVisibility);
 $("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = Object.fromEntries(new FormData(e.target).entries());
+  const body = {};
+  for (const el of e.target.elements) {
+    if (el.name) body[el.name] = el.type === "checkbox" ? el.checked : el.value;
+  }
   const msg = $("settings-msg");
   try {
     await api("/api/settings", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -442,41 +539,65 @@ $("btn-reset").addEventListener("click", async () => {
 /* ---------- backtest ---------- */
 let lastBacktest = null;
 function drawBacktest() {
-  const c = lastBacktest.curve;
+  const {main, other} = lastBacktest;
   drawChart($("chart-bt"), [
-    {values: c.map((p) => p.benchmark), color: "--muted", width: 1.5},
-    {values: c.map((p) => p.equity), color: "--accent"},
-  ], c.map((p) => p.ts));
+    {values: main.curve.map((p) => p.market), color: "--muted", width: 1.5},
+    {values: other.curve.map((p) => p.equity), color: "--alt", width: 1.5},
+    {values: main.curve.map((p) => p.equity), color: "--accent", width: 2.5},
+  ], main.curve.map((p) => p.ts));
 }
 
 $("btn-backtest").addEventListener("click", async () => {
   const btn = $("btn-backtest"), out = $("bt-result");
   btn.disabled = true; btn.textContent = "Calculando…";
   try {
-    const b = lastBacktest = await api("/api/backtest?years=" + $("bt-years").value);
-    const opt = (v, f) => (v === null ? "—" : f(v));
-    const synthetic = b.provider !== "yahoo"
+    const years = $("bt-years").value;
+    const mine = state.settings.strategy, alt = mine === "rotation" ? "checklist" : "rotation";
+    const main = await api(`/api/backtest?years=${years}`);
+    const other = await api(`/api/backtest?years=${years}&strategy=${alt}`);
+    lastBacktest = {main, other};
+    const opt = (v, f) => (v === null || v === undefined ? "—" : f(v));
+    const cell = (st, f, k) => `<td class="r num ${k && st ? cls(k(st)) : ""}">${st ? f(st) : "—"}</td>`;
+    const cols = [main.bot, other.bot, main.market, main.universe];
+    const line = (label, f, k) => `<tr><td>${label}</td>${cols.map((c) => cell(c, f, k)).join("")}</tr>`;
+    const synthetic = main.provider !== "yahoo"
       ? `<div class="banner warn" style="margin-top:0"><b>Datos simulados:</b> este resultado no dice nada sobre el mercado real.</div>` : "";
-    const errors = Object.keys(b.errors).length
-      ? `<div class="banner err" style="margin-top:0">Sin datos para: ${Object.keys(b.errors).map(esc).join(", ")}</div>` : "";
+    const errors = Object.keys(main.errors).length
+      ? `<div class="banner err" style="margin-top:0">Sin datos para: ${Object.keys(main.errors).map(esc).join(", ")}</div>` : "";
+    const beat = main.by_year.filter((y) => y.market_pct !== null && y.bot_pct > y.market_pct).length;
     out.innerHTML = synthetic + errors + `
-      <div class="kpis" style="margin-top:0">
-        ${kpi("Bot · rentabilidad", pct(b.total_return_pct, 1), `${pct(b.cagr_pct, 1)} anual`, cls(b.total_return_pct))}
-        ${kpi("Comprar y mantener", pct(b.benchmark_return_pct, 1), `${pct(b.benchmark_cagr_pct, 1)} anual`, cls(b.benchmark_return_pct))}
-        ${kpi("Peor caída del bot", "-" + b.max_drawdown_pct.toFixed(1) + " %", `Comprar y mantener: -${b.benchmark_max_drawdown_pct.toFixed(1)} %`)}
-        ${kpi("Operaciones cerradas", b.trades_closed, `Aciertos: ${opt(b.win_rate_pct, (v) => v.toFixed(0) + " %")}`)}
-        ${kpi("Ganancia / pérdida media", opt(b.avg_win_pct, (v) => pct(v, 1)), `Pérdida media: ${opt(b.avg_loss_pct, (v) => pct(v, 1))}`)}
+      <div class="card">
+        <h2>${esc(main.start)} → ${esc(main.end)} · empezando con ${money(main.initial_cash)}</h2>
+        <div class="scroll"><table><thead><tr><th></th><th class="r">Tu estrategia<br>(${STRATEGY[mine]})</th>
+          <th class="r">La otra<br>(${STRATEGY[alt]})</th><th class="r">Comprar ${esc(main.benchmark)}<br>y no tocarlo</th>
+          <th class="r">Comprar todos<br>tus tickers</th></tr></thead><tbody>
+          ${line("Valor final", (c) => money(c.final))}
+          ${line("Rentabilidad total", (c) => pct(c.total_return_pct, 1), (c) => c.total_return_pct)}
+          ${line("Rentabilidad anual", (c) => pct(c.cagr_pct, 1), (c) => c.cagr_pct)}
+          ${line("Peor caída", (c) => "-" + c.max_drawdown_pct.toFixed(1) + " %")}
+          ${line("Rentabilidad por unidad de riesgo (Sharpe)", (c) => opt(c.sharpe, (v) => v.toFixed(2)))}
+        </tbody></table></div>
+        <canvas id="chart-bt" style="margin-top:14px"></canvas>
+        <div class="legend"><span><i style="background:var(--accent)"></i>Tu estrategia</span>
+          <span><i style="background:var(--alt)"></i>La otra estrategia</span>
+          <span><i style="background:var(--muted)"></i>Comprar ${esc(main.benchmark)} y no tocarlo</span></div>
+        <div class="sub" style="margin-top:8px">Tu estrategia: ${main.trades_closed} operaciones cerradas,
+          ${opt(main.win_rate_pct, (v) => v.toFixed(0) + " %")} con ganancia
+          (media ${opt(main.avg_win_pct, (v) => pct(v, 1))} frente a ${opt(main.avg_loss_pct, (v) => pct(v, 1))} en las perdedoras),
+          invertido de media el ${main.avg_exposure_pct.toFixed(0)} % del capital, ${money(main.fees_paid)} en comisiones.</div>
       </div>
       <div class="card">
-        <h2>${esc(b.start)} → ${esc(b.end)} · de ${money(b.initial_cash)} a ${money(b.final_equity)}</h2>
-        <canvas id="chart-bt"></canvas>
-        <div class="legend"><span><i style="background:var(--accent)"></i>Bot</span>
-          <span><i style="background:var(--muted)"></i>Comprar y mantener todos los tickers a partes iguales</span></div>
-        <div class="sub" style="margin-top:8px">Comisiones simuladas pagadas: ${money(b.fees_paid)}.
-          El bot solo invierte ${money(state.settings.position_size)} por posición, así que parte del capital suele estar en efectivo.</div>
+        <h2>Año a año · tu estrategia superó al índice en ${beat} de ${main.by_year.length} años</h2>
+        <div class="scroll"><table><thead><tr><th>Año</th><th class="r">Tu estrategia</th><th class="r">La otra</th>
+          <th class="r">${esc(main.benchmark)}</th></tr></thead><tbody>` + main.by_year.map((y, i) => `<tr>
+            <td>${y.year}</td><td class="r num ${cls(y.bot_pct)}">${pct(y.bot_pct, 1)}</td>
+            <td class="r num ${cls(other.by_year[i].bot_pct)}">${pct(other.by_year[i].bot_pct, 1)}</td>
+            <td class="r num ${y.market_pct === null ? "" : cls(y.market_pct)}">${opt(y.market_pct, (v) => pct(v, 1))}</td></tr>`).join("") + `
+        </tbody></table></div>
+        <div class="sub" style="margin-top:8px">El primer y el último año pueden estar incompletos.</div>
       </div>
-      <div class="card"><h2>Últimas operaciones del backtest</h2><div class="scroll">${
-        b.last_trades.length ? tradesTable(b.last_trades) : `<div class="empty">Ninguna operación en el periodo.</div>`}</div></div>`;
+      <div class="card"><h2>Últimas operaciones simuladas de tu estrategia</h2><div class="scroll">${
+        main.last_trades.length ? tradesTable(main.last_trades) : `<div class="empty">Ninguna operación en el periodo.</div>`}</div></div>`;
     drawBacktest();
   } catch (err) {
     out.innerHTML = `<div class="banner err" style="margin-top:0">No se pudo ejecutar el backtest: ${esc(err.message)}</div>`;

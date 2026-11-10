@@ -1,16 +1,19 @@
+import base64
 import json
 import math
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from app import create_app
-from bot import engine
+from bot import engine, notify
 from bot.backtest import run_backtest
 from bot.config import DEFAULT_SETTINGS, SettingsError, validate_settings
 from bot.data import SyntheticProvider
-from bot.engine import check_exit, rank_candidates, run_cycle
+from bot.engine import (check_exit, plan_rotation, position_amount, rank_candidates, run_cycle,
+                        split_live_bars, us_market_open)
 from bot.indicators import compute_indicators, rsi
 from bot.portfolio import Account, Position
 from bot.rules import RULES, evaluate
@@ -20,18 +23,23 @@ from bot.store import Store
 GOOD_ROW = {
     "open": 100.0, "close": 100.0, "sma50": 95.0, "sma200": 90.0, "rsi": 60.0,
     "macd": 1.0, "macd_signal": 0.5, "macd_hist": 0.5, "macd_hist_prev": 0.3,
-    "vol_ratio": 1.1, "high52": 102.0, "ret63": 0.08, "vol30": 0.20,
+    "vol_ratio": 1.1, "high52": 102.0, "ret63": 0.08, "ret126": 0.15, "ret252": 0.25, "vol30": 0.20,
 }
+# La estrategia original: lista de condiciones con importe fijo.
+CHECKLIST = dict(strategy="checklist", sizing_mode="fixed", position_size=100, max_positions=10,
+                 stop_loss_pct=8, trailing_stop_pct=12, exit_score_pct=50, fee_pct=0)
+UTC = timezone.utc
 
 
-def frame(closes):
-    idx = pd.bdate_range("2020-01-01", periods=len(closes))
+def frame(closes, end=None):
+    idx = (pd.bdate_range("2020-01-01", periods=len(closes)) if end is None
+           else pd.bdate_range(end=end, periods=len(closes)))
     c = pd.Series(closes, index=idx, dtype=float)
     return pd.DataFrame({"Open": c, "High": c, "Low": c, "Close": c, "Volume": 1000.0}, index=idx)
 
 
 class FakeProvider:
-    """Devuelve una serie plana con el precio indicado; la puntuación se controla aparte."""
+    """Serie plana con el precio indicado; la puntuación se controla con `patch_scores`."""
     name = "fake"
 
     def __init__(self, prices):
@@ -43,15 +51,27 @@ class FakeProvider:
         return frame([self.prices[symbol]] * 300)
 
 
+class TrendProvider:
+    """Cada ticker crece (o cae) a un ritmo diario constante y termina en 100."""
+    name = "trend"
+
+    def __init__(self, growth):
+        self.growth = growth
+
+    def history(self, symbol, days):
+        g = self.growth[symbol]
+        return frame(100 * (1 + g) ** np.arange(-299, 1))
+
+
 def patch_scores(monkeypatch, scores):
     """Hace que cada ticker obtenga la puntuación indicada (n condiciones de 10)."""
-    def fake_build(symbol, row, ts, error=None):
+    def fake_build(symbol, row, ts, error=None, price=None):
+        base = {"symbol": symbol, "ts": ts, "results": [], "ret63": 0.0, "mom": 0.0, "trend_ok": True}
         if row is None:
-            return {"symbol": symbol, "ts": ts, "price": None, "score_pct": None, "passed": None,
-                    "total": None, "status": error, "results": [], "ret63": None}
+            return {**base, "price": None, "score_pct": None, "passed": None, "total": None, "status": error}
         n = scores[symbol]
-        return {"symbol": symbol, "ts": ts, "price": row["close"], "score_pct": n * 10.0, "passed": n,
-                "total": 10, "status": "ok", "results": [], "ret63": 0.0}
+        return {**base, "price": row["close"] if price is None else price, "score_pct": n * 10.0,
+                "passed": n, "total": 10, "status": "ok"}
     monkeypatch.setattr(engine, "build_signal", fake_build)
 
 
@@ -70,6 +90,7 @@ def test_sma_and_rsi_extremes():
     down = rsi(pd.Series(np.arange(300, 0, -1), dtype=float))
     assert down.iloc[-1] == pytest.approx(0.0)
     assert math.isnan(up["sma200"].iloc[100])  # aún sin historia suficiente
+    assert up["ret126"].iloc[-1] == pytest.approx(300 / 174 - 1)
 
 
 # --- condiciones -------------------------------------------------------------
@@ -79,7 +100,7 @@ def test_all_rules_pass_on_good_row():
 
 
 @pytest.mark.parametrize("override", [
-    {"sma200": 120.0, "sma50": 119.0},  # rompe trend_200 (y otras)
+    {"sma200": 120.0, "sma50": 119.0},
     {"rsi": 80.0}, {"rsi": 30.0}, {"macd": 0.1}, {"macd_hist_prev": 0.9},
     {"vol_ratio": 0.5}, {"high52": 150.0}, {"ret63": -0.01}, {"vol30": 0.8},
 ])
@@ -90,6 +111,14 @@ def test_each_rule_can_fail(override):
 def test_missing_data_counts_as_failed():
     ev = evaluate({**GOOD_ROW, "rsi": float("nan")})
     assert ev["passed"] == 9 and ev["score_pct"] == 90.0
+
+
+def test_signal_has_momentum_and_trend():
+    sig = engine.build_signal("A", GOOD_ROW, "t", price=101.0)
+    assert sig["mom"] == pytest.approx((0.08 + 0.15 + 0.25) / 3) and sig["trend_ok"] is True
+    assert sig["price"] == 101.0 and sig["status"] == "ok"
+    assert engine.build_signal("A", {**GOOD_ROW, "ret252": float("nan")}, "t")["mom"] is None
+    assert engine.build_signal("A", {**GOOD_ROW, "sma200": float("nan")}, "t")["status"].startswith("historia")
 
 
 # --- cartera -----------------------------------------------------------------
@@ -110,57 +139,89 @@ def test_cannot_buy_without_cash():
     assert acc.buy("AAA", 10.0, 100.0, "t0", 90.0, "x") is None and acc.cash == 50.0
 
 
+def test_position_amount():
+    s = validate_settings({"sizing_mode": "percent", "position_pct": 20})
+    acc = Account(cash=1000.0)
+    assert position_amount(acc, s) == pytest.approx(200.0)
+    acc.buy("A", 10.0, 200.0, "t", 0, "x")
+    acc.positions["A"].mark(20.0)                      # la cartera vale 1.200
+    assert position_amount(acc, s) == pytest.approx(240.0)  # se reinvierten las ganancias
+    acc.cash = 95.0                                    # cartera 495 -> objetivo 99
+    assert position_amount(acc, s) == pytest.approx(95.0)   # casi llega: usa lo que queda
+    acc.cash = 50.0                                    # cartera 450 -> objetivo 90
+    assert position_amount(acc, s) == 0.0                   # muy por debajo: no compra
+    fixed = validate_settings({"sizing_mode": "fixed", "position_size": 100})
+    assert position_amount(Account(cash=1000.0), fixed) == 100.0
+
+
 # --- decisiones --------------------------------------------------------------
 def test_buy_threshold_is_90_percent():
-    sigs = [{"symbol": s, "status": "ok", "score_pct": p, "ret63": 0.0}
-            for s, p in [("A", 100.0), ("B", 90.0), ("C", 80.0), ("D", 89.9)]]
-    assert [s["symbol"] for s in rank_candidates(sigs, set(), DEFAULT_SETTINGS)] == ["A", "B"]
-    assert [s["symbol"] for s in rank_candidates(sigs, {"A"}, DEFAULT_SETTINGS)] == ["B"]
+    s = validate_settings(CHECKLIST)
+    sigs = [{"symbol": x, "status": "ok", "score_pct": p, "ret63": 0.0}
+            for x, p in [("A", 100.0), ("B", 90.0), ("C", 80.0), ("D", 89.9)]]
+    assert [x["symbol"] for x in rank_candidates(sigs, set(), s)] == ["A", "B"]
+    assert [x["symbol"] for x in rank_candidates(sigs, {"A"}, s)] == ["B"]
 
 
 def test_exit_reasons():
-    s = dict(DEFAULT_SETTINGS)
+    s = validate_settings(CHECKLIST)
     pos = Position("A", 1.0, 100.0, "t", 90.0, 100.0, 100.0)
     assert check_exit(pos, 100.0, 90.0, s) is None
     assert check_exit(pos, 92.0, 90.0, s).startswith("Stop-loss")
     assert check_exit(pos, 100.0, 40.0, s).startswith("Condiciones deterioradas")
     assert check_exit(pos, 100.0, 50.0, s) is None  # justo en el límite se mantiene
+    assert check_exit(pos, 100.0, None, s) is None  # sin puntuación no se vende por condiciones
     pos.mark(150.0)
     assert check_exit(pos, 131.0, 90.0, s).startswith("Trailing stop")
     assert check_exit(pos, 135.0, 90.0, s) is None
     assert check_exit(pos, 135.0, 90.0, {**s, "take_profit_pct": 30.0}).startswith("Objetivo")
+    assert check_exit(pos, 131.0, 90.0, {**s, "trailing_stop_pct": 0.0}) is None
 
 
-def test_cycle_buys_only_above_threshold_and_sells_on_stop(monkeypatch):
-    store = make_store(universe="AAA BBB CCC", fee_pct=0)
+def test_plan_rotation_picks_strongest_and_respects_filters():
+    s = validate_settings({"max_positions": 2, "rotation_min_score_pct": 60, "trend_filter": True})
+    def sig(sym, mom, score=80.0, trend=True, status="ok"):
+        return {"symbol": sym, "status": status, "mom": mom, "score_pct": score, "trend_ok": trend}
+    signals = [sig("A", 0.50), sig("B", 0.40, score=50.0), sig("C", 0.30, trend=False),
+               sig("D", 0.20), sig("E", 0.10), sig("F", None), sig("G", None, status="error")]
+    sells, buys = plan_rotation(signals, {"E", "G"}, s)
+    assert [b["symbol"] for b in buys] == ["A", "D"]  # B: pocas condiciones; C: bajo su media
+    assert list(sells) == ["E"]                        # G no tiene datos hoy: no se toca
+    _, buys = plan_rotation(signals, set(), {**s, "trend_filter": False, "rotation_min_score_pct": 0})
+    assert [b["symbol"] for b in buys] == ["A", "B"]
+
+
+# --- ciclo: lista de condiciones ---------------------------------------------
+def test_checklist_cycle_buys_above_threshold_and_sells_on_stop(monkeypatch):
+    store = make_store(universe="AAA BBB CCC", **CHECKLIST)
     patch_scores(monkeypatch, {"AAA": 9, "BBB": 8, "CCC": 10})
     summary = run_cycle(FakeProvider({"AAA": 10.0, "BBB": 10.0, "CCC": 10.0}), store)
-    assert summary["buys"] == ["CCC", "AAA"] and summary["sells"] == []
+    assert [b["symbol"] for b in summary["buys"]] == ["CCC", "AAA"] and summary["sells"] == []
     acc = store.load_account(0)
     assert set(acc.positions) == {"AAA", "CCC"} and acc.cash == pytest.approx(800.0)
 
     # AAA cae un 10 % -> stop-loss. CCC se mantiene. BBB sigue sin llegar al 90 %.
     summary = run_cycle(FakeProvider({"AAA": 9.0, "BBB": 10.0, "CCC": 10.0}), store)
-    assert [s["symbol"] for s in summary["sells"]] == ["AAA"] and summary["buys"] == []
+    assert [x["symbol"] for x in summary["sells"]] == ["AAA"] and summary["buys"] == []
     acc = store.load_account(0)
     assert set(acc.positions) == {"CCC"} and acc.cash == pytest.approx(890.0)
     assert store.realized_pnl() == pytest.approx(-10.0)
     assert len(store.equity_history()) == 2 and len(store.trades()) == 3
 
 
-def test_cycle_respects_max_positions_and_cash(monkeypatch):
-    store = make_store(universe="A B C D", max_positions=2, fee_pct=0)
+def test_checklist_cycle_respects_max_positions_and_cash(monkeypatch):
+    store = make_store(universe="A B C D", **{**CHECKLIST, "max_positions": 2})
     patch_scores(monkeypatch, {"A": 10, "B": 10, "C": 10, "D": 10})
     prices = {"A": 5.0, "B": 5.0, "C": 5.0, "D": 5.0}
     assert len(run_cycle(FakeProvider(prices), store)["buys"]) == 2
     assert run_cycle(FakeProvider(prices), store)["buys"] == []  # ya está lleno
 
-    store = make_store(universe="A B C D", initial_cash=250, fee_pct=0)
+    store = make_store(universe="A B C D", initial_cash=250, **CHECKLIST)
     assert len(run_cycle(FakeProvider(prices), store)["buys"]) == 2  # solo hay efectivo para dos
 
 
 def test_cycle_survives_broken_ticker_and_keeps_position(monkeypatch):
-    store = make_store(universe="AAA BBB", fee_pct=0)
+    store = make_store(universe="AAA BBB", **CHECKLIST)
     patch_scores(monkeypatch, {"AAA": 10, "BBB": 10})
     run_cycle(FakeProvider({"AAA": 10.0, "BBB": 10.0}), store)
     summary = run_cycle(FakeProvider({"AAA": 10.0}), store)  # BBB deja de tener datos
@@ -168,26 +229,137 @@ def test_cycle_survives_broken_ticker_and_keeps_position(monkeypatch):
     assert set(store.load_account(0).positions) == {"AAA", "BBB"}
 
 
+def test_no_rebuy_on_the_day_of_a_sale(monkeypatch):
+    store = make_store(universe="AAA", **CHECKLIST)
+    patch_scores(monkeypatch, {"AAA": 10})
+    day1 = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    assert len(run_cycle(FakeProvider({"AAA": 10.0}), store, now=day1)["buys"]) == 1
+    later = day1.replace(hour=16)
+    assert len(run_cycle(FakeProvider({"AAA": 9.0}), store, now=later)["sells"]) == 1  # stop-loss
+    assert run_cycle(FakeProvider({"AAA": 9.0}), store, now=later.replace(hour=17))["buys"] == []
+    assert len(run_cycle(FakeProvider({"AAA": 9.0}), store, now=day1.replace(day=6))["buys"]) == 1
+
+
+def test_market_filter_blocks_new_buys(monkeypatch):
+    store = make_store(universe="AAA", market_filter=True, benchmark="IDX", **CHECKLIST)
+    patch_scores(monkeypatch, {"AAA": 10})
+    falling = run_cycle(TrendProvider({"AAA": 0.001, "IDX": -0.001}), store)
+    assert falling["market_ok"] is False and falling["buys"] == [] and falling["notes"]
+    rising = run_cycle(TrendProvider({"AAA": 0.001, "IDX": 0.001}), store)
+    assert rising["market_ok"] is True and len(rising["buys"]) == 1
+
+
+# --- ciclo: rotación mensual -------------------------------------------------
+ROTATION = dict(strategy="rotation", universe="A B C D", max_positions=2, position_pct=50,
+                rotation_min_score_pct=0, fee_pct=0, stop_loss_pct=25)
+
+
+def test_rotation_enters_once_a_month_and_rotates(monkeypatch):
+    store = make_store(**ROTATION)
+    jan = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    first = run_cycle(TrendProvider({"A": 0.003, "B": 0.002, "C": 0.001, "D": -0.001}), store, now=jan)
+    assert first["rebalanced"] and [b["symbol"] for b in first["buys"]] == ["A", "B"]
+    assert store.load_account(0).cash == pytest.approx(0.0)  # 2 x 50 %
+
+    # Mismo mes: aunque cambie el ranking, no se rota otra vez.
+    changed = TrendProvider({"A": -0.001, "B": 0.002, "C": 0.004, "D": 0.001})
+    same_month = run_cycle(changed, store, now=jan.replace(day=20))
+    assert not same_month["rebalanced"] and same_month["buys"] == [] and same_month["sells"] == []
+
+    # Mes siguiente: A ha perdido fuerza (y está bajo su media) -> sale; entra C.
+    feb = run_cycle(changed, store, now=datetime(2026, 2, 2, 15, 0, tzinfo=UTC))
+    assert feb["rebalanced"] and [x["symbol"] for x in feb["sells"]] == ["A"]
+    assert [b["symbol"] for b in feb["buys"]] == ["C"]
+    assert set(store.load_account(0).positions) == {"B", "C"}
+    signals = {g["symbol"]: g for g in store.signals()}
+    assert signals["C"]["rank"] == 1 and signals["C"]["target"] and signals["A"]["rank"] is None
+
+
+def test_rotation_keeps_stop_loss_between_rebalances():
+    store = make_store(**ROTATION)
+    jan = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    run_cycle(FakeProviderWithHistory({"A": 100.0, "B": 100.0, "C": 95.0, "D": 95.0}), store, now=jan)
+    assert set(store.load_account(0).positions) == {"A", "B"}
+    crash = run_cycle(FakeProviderWithHistory({"A": 70.0, "B": 100.0, "C": 95.0, "D": 95.0}), store,
+                      now=jan.replace(day=12))
+    assert [x["symbol"] for x in crash["sells"]] == ["A"] and crash["sells"][0]["reason"].startswith("Stop-loss")
+    assert not crash["rebalanced"] and crash["buys"] == []  # el hueco se rellena en la próxima rotación
+
+
+class FakeProviderWithHistory:
+    """Tendencia alcista suave que termina en el precio indicado (último día: salto al precio)."""
+    name = "fake"
+
+    def __init__(self, last):
+        self.last = last
+
+    def history(self, symbol, days):
+        if symbol not in self.last:
+            raise RuntimeError("ticker desconocido")
+        closes = list(100 * 1.001 ** np.arange(-299, 0)) + [self.last[symbol]]
+        return frame(closes)
+
+
+def test_rotation_waits_when_too_many_tickers_fail():
+    store = make_store(**ROTATION)
+    summary = run_cycle(TrendProvider({"A": 0.003}), store)  # faltan B, C y D
+    assert not summary["rebalanced"] and summary["buys"] == [] and summary["notes"]
+
+
+# --- reloj de mercado --------------------------------------------------------
+def test_market_hours_and_partial_bar():
+    assert us_market_open(datetime(2026, 1, 5, 15, 0, tzinfo=UTC))        # lunes 10:00 NY
+    assert not us_market_open(datetime(2026, 1, 5, 13, 0, tzinfo=UTC))    # lunes 08:00 NY
+    assert not us_market_open(datetime(2026, 1, 5, 21, 30, tzinfo=UTC))   # lunes 16:30 NY
+    assert not us_market_open(datetime(2026, 1, 3, 15, 0, tzinfo=UTC))    # sábado
+
+    df = frame([10.0] * 9 + [11.0], end="2026-01-05")
+    bars, price = split_live_bars(df, datetime(2026, 1, 5, 15, 0, tzinfo=UTC))
+    assert len(bars) == 9 and price == 11.0   # en sesión: la vela de hoy no cuenta para los indicadores
+    bars, price = split_live_bars(df, datetime(2026, 1, 5, 22, 0, tzinfo=UTC))
+    assert len(bars) == 10 and price == 11.0  # tras el cierre ya es una vela completa
+
+
+def test_real_time_provider_only_trades_during_market_hours(monkeypatch):
+    class Live(FakeProvider):
+        real_time = True
+    store = make_store(universe="AAA", **CHECKLIST)
+    patch_scores(monkeypatch, {"AAA": 10})
+    closed = run_cycle(Live({"AAA": 10.0}), store, now=datetime(2026, 1, 3, 15, 0, tzinfo=UTC))
+    assert closed["can_trade"] is False and closed["buys"] == [] and closed["evaluated"] == 1
+    opened = run_cycle(Live({"AAA": 10.0}), store, now=datetime(2026, 1, 5, 15, 0, tzinfo=UTC))
+    assert opened["can_trade"] is True and len(opened["buys"]) == 1
+
+
 # --- ajustes -----------------------------------------------------------------
 def test_settings_validation():
-    s = validate_settings({"universe": "spy, qqq\nSPY", "buy_threshold_pct": "85", "max_positions": "3"})
+    s = validate_settings({"universe": "spy, qqq\nSPY", "buy_threshold_pct": "85", "max_positions": "3",
+                           "market_filter": "true", "trend_filter": False, "benchmark": "qqq"})
     assert s["universe"] == ["SPY", "QQQ"] and s["buy_threshold_pct"] == 85.0 and s["max_positions"] == 3
+    assert s["market_filter"] is True and s["trend_filter"] is False and s["benchmark"] == "QQQ"
     for bad in ({"universe": "<script>"}, {"universe": ""}, {"buy_threshold_pct": 120},
-                {"position_size": "abc"}, {"stop_loss_pct": float("nan")}):
+                {"position_size": "abc"}, {"stop_loss_pct": float("nan")}, {"strategy": "magia"},
+                {"sizing_mode": "todo"}, {"market_filter": "quizá"}, {"benchmark": "a b"}):
         with pytest.raises(SettingsError):
             validate_settings(bad)
+    assert validate_settings({}) == DEFAULT_SETTINGS
 
 
 # --- backtest ----------------------------------------------------------------
-def test_backtest_is_consistent_and_deterministic():
-    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM"})
+@pytest.mark.parametrize("strategy", ["rotation", "checklist"])
+def test_backtest_is_consistent_and_deterministic(strategy):
+    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM", "strategy": strategy})
     a = run_backtest(SyntheticProvider(), settings, years=2)
     b = run_backtest(SyntheticProvider(), settings, years=2)
-    assert a["final_equity"] == b["final_equity"]
-    assert a["curve"][0]["equity"] == pytest.approx(1000.0)
-    assert a["curve"][-1]["equity"] == pytest.approx(a["final_equity"])
-    assert a["total_return_pct"] == pytest.approx(100 * (a["final_equity"] / 1000 - 1))
-    assert 0 <= a["max_drawdown_pct"] <= 100
+    assert a["bot"] == b["bot"] and a["strategy"] == strategy
+    assert a["curve"][0]["equity"] == pytest.approx(1000.0, rel=0.01)
+    assert a["curve"][-1]["equity"] == pytest.approx(a["bot"]["final"])
+    assert a["bot"]["total_return_pct"] == pytest.approx(100 * (a["bot"]["final"] / 1000 - 1))
+    assert 0 <= a["bot"]["max_drawdown_pct"] <= 100 and 0 <= a["avg_exposure_pct"] <= 100
+    assert a["market"]["final"] == pytest.approx(a["curve"][-1]["market"])
+    assert [y["year"] for y in a["by_year"]] == sorted(y["year"] for y in a["by_year"])
+    total = np.prod([1 + y["bot_pct"] / 100 for y in a["by_year"]])
+    assert total == pytest.approx(a["bot"]["final"] / a["curve"][0]["equity"])  # los años encadenan
     json.dumps(a, allow_nan=False)  # debe ser JSON válido (sin NaN)
 
 
@@ -203,41 +375,41 @@ def test_backtest_executes_at_next_open_not_same_close():
         assert t["price"] == pytest.approx(df.loc[t["ts"], "Open"])
 
 
-# --- API ---------------------------------------------------------------------
-def test_api_flow():
-    client = create_app(provider=SyntheticProvider(), db_path=":memory:").test_client()
-    assert client.get("/").status_code == 200
-    state = client.get("/api/state").get_json()
-    assert state["account"]["equity"] == 1000.0 and state["positions"] == [] and state["provider"] == "synthetic"
-
-    assert client.post("/api/settings", json={"universe": "SPY QQQ", "position_size": 50}).status_code == 200
-    assert client.post("/api/settings", json={"buy_threshold_pct": 10}).status_code == 400
-
-    cycle = client.post("/api/cycle").get_json()
-    assert cycle["evaluated"] == 2
-    state = client.get("/api/state").get_json()
-    assert [s["symbol"] for s in state["signals"]] and len(state["equity"]) == 1
-    assert all(len(s["results"]) == 10 for s in state["signals"])
-
-    assert client.get("/api/backtest?years=1").status_code == 200
-    assert client.get("/api/backtest?years=99").status_code == 400
-
-    assert client.post("/api/reset").get_json() == {"ok": True}
-    state = client.get("/api/state").get_json()
-    assert state["trades"] == [] and state["signals"] == [] and state["last_cycle"] is None
+def test_backtest_end_date_cuts_the_future():
+    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM"})
+    res = run_backtest(SyntheticProvider(), settings, years=2, end="2022-06-30")
+    assert res["end"] == "2022-06-30" and res["start"].startswith("2020-0")
 
 
-def test_no_rebuy_on_the_day_of_a_sale(monkeypatch):
-    from datetime import datetime, timezone
-    store = make_store(universe="AAA", fee_pct=0)
-    patch_scores(monkeypatch, {"AAA": 10})
-    day1 = datetime(2026, 1, 5, 15, 0, tzinfo=timezone.utc)
-    assert run_cycle(FakeProvider({"AAA": 10.0}), store, now=day1)["buys"] == ["AAA"]
-    later = day1.replace(hour=16)
-    assert len(run_cycle(FakeProvider({"AAA": 9.0}), store, now=later)["sells"]) == 1  # stop-loss
-    assert run_cycle(FakeProvider({"AAA": 9.0}), store, now=later.replace(hour=17))["buys"] == []
-    day2 = day1.replace(day=6)
-    assert run_cycle(FakeProvider({"AAA": 9.0}), store, now=day2)["buys"] == ["AAA"]
+# --- alertas -----------------------------------------------------------------
+def test_telegram_alert(monkeypatch):
+    summary = {"buys": [{"symbol": "SPY", "amount": 200.0, "price": 500.0, "reason": "r1"}],
+               "sells": [{"symbol": "KO", "pnl": -3.5, "pnl_pct": -1.7, "reason": "r2"}], "equity": 1010.0}
+    text = notify.format_cycle(summary)
+    assert "COMPRA SPY" in text and "VENTA KO" in text and "1010.00" in text
+    assert notify.format_cycle({"buys": [], "sells": [], "equity": 1.0}) is None
+
+    sent = []
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def opener(request, timeout):
+        sent.append((request.full_url, json.loads(request.data)))
+        return Response()
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert notify.notify_cycle(summary, opener) is False and sent == []  # sin configurar no envía
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TKN")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    assert notify.notify_cycle(summary, opener) is True
+    assert sent[0][0].endswith("/botTKN/sendMessage") and sent[0][1]["chat_id"] == "42"
+
+    def broken(request, timeout):
+        raise OSError("sin red")
+    assert notify.notify_cycle(summary, broken) is False  # un fallo de red no rompe el bot
 
 
 def test_yahoo_provider_normalises_and_caches(monkeypatch):
@@ -255,9 +427,8 @@ def test_yahoo_provider_normalises_and_caches(monkeypatch):
             if self.symbol == "NOPE":
                 return pd.DataFrame()
             idx = pd.date_range("2026-01-05 00:00", periods=3, freq="D", tz="America/New_York")
-            df = pd.DataFrame({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": [1.5, None, 1.7],
-                               "Volume": 10, "Dividends": 0.0}, index=idx)
-            return df
+            return pd.DataFrame({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": [1.5, None, 1.7],
+                                 "Volume": 10, "Dividends": 0.0}, index=idx)
 
     monkeypatch.setattr(yfinance, "Ticker", FakeTicker)
     provider = YahooProvider()
@@ -268,3 +439,45 @@ def test_yahoo_provider_normalises_and_caches(monkeypatch):
     assert calls == [("SPY", "1d", True)]  # la segunda llamada sale de la caché
     with pytest.raises(DataError):
         provider.history("NOPE", 800)
+
+
+# --- API ---------------------------------------------------------------------
+def test_api_flow():
+    client = create_app(provider=SyntheticProvider(), db_path=":memory:").test_client()
+    assert client.get("/").status_code == 200
+    state = client.get("/api/state").get_json()
+    assert state["account"]["equity"] == 1000.0 and state["positions"] == [] and state["provider"] == "synthetic"
+    assert state["rebalance_pending"] is True and state["settings"]["strategy"] == "rotation"
+
+    saved = client.post("/api/settings", json={"universe": "SPY QQQ KO XOM", "monthly_cost": 5, "trend_filter": False})
+    assert saved.status_code == 200 and saved.get_json()["trend_filter"] is False
+    bad = client.post("/api/settings", json={"buy_threshold_pct": 10})
+    assert bad.status_code == 400 and "Umbral de compra" in bad.get_json()["error"]
+
+    cycle = client.post("/api/cycle").get_json()
+    assert cycle["evaluated"] == 4 and cycle["strategy"] == "rotation"
+    state = client.get("/api/state").get_json()
+    assert len(state["signals"]) == 4 and len(state["equity"]) == 1
+    assert all(len(g["results"]) == 10 and "mom" in g for g in state["signals"])
+    assert state["account"]["net_pnl"] <= state["account"]["pnl"]
+
+    assert client.get("/api/backtest?years=1").get_json()["strategy"] == "rotation"
+    assert client.get("/api/backtest?years=1&strategy=checklist").get_json()["strategy"] == "checklist"
+    assert client.get("/api/state").get_json()["settings"]["strategy"] == "rotation"  # no se guarda
+    assert client.get("/api/backtest?years=99").status_code == 400
+    assert client.get("/api/backtest?years=1&strategy=x").status_code == 400
+
+    assert client.post("/api/reset").get_json() == {"ok": True}
+    state = client.get("/api/state").get_json()
+    assert state["trades"] == [] and state["signals"] == [] and state["last_cycle"] is None
+
+
+def test_panel_password():
+    client = create_app(provider=SyntheticProvider(), db_path=":memory:", password="s3creta").test_client()
+    assert client.get("/").status_code == 401
+    assert client.get("/api/state").status_code == 401
+    assert client.post("/api/reset").status_code == 401
+    wrong = {"Authorization": "Basic " + base64.b64encode(b"yo:otra").decode()}
+    assert client.get("/api/state", headers=wrong).status_code == 401
+    right = {"Authorization": "Basic " + base64.b64encode(b"yo:s3creta").decode()}
+    assert client.get("/api/state", headers=right).status_code == 200

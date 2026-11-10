@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+from datetime import datetime, timezone
 
 from .config import DEFAULT_SETTINGS, validate_settings
 from .portfolio import Account, Position
@@ -24,6 +25,9 @@ CREATE TABLE IF NOT EXISTS signals (
 """
 
 
+_SIGNAL_EXTRA = ("results", "mom", "trend_ok", "rank", "target")  # se guardan como JSON
+
+
 class Store:
     def __init__(self, path: str):
         if path != ":memory:":
@@ -35,6 +39,9 @@ class Store:
             self._db.executescript(_SCHEMA)
         if self._get("cash") is None:
             self.reset()
+        elif self._get("created_at") is None:  # bases de datos de versiones anteriores
+            with self._lock, self._db:
+                self._set("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     # --- meta -----------------------------------------------------------------
     def _get(self, key: str):
@@ -56,6 +63,10 @@ class Store:
         with self._lock, self._db:
             self._set("settings", settings)
 
+    def get_meta(self, key: str):
+        with self._lock:
+            return self._get(key)
+
     def get_last_cycle(self):
         with self._lock:
             return self._get("last_cycle")
@@ -74,7 +85,8 @@ class Store:
             initial = float(validate_settings(saved, DEFAULT_SETTINGS)["initial_cash"])
             self._set("cash", initial)
             self._set("initial_cash", initial)
-            self._db.execute("DELETE FROM meta WHERE key='last_cycle'")
+            self._db.execute("DELETE FROM meta WHERE key IN ('last_cycle', 'last_rebalance')")
+            self._set("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def load_account(self, fee_pct: float) -> Account:
         with self._lock:
@@ -86,9 +98,11 @@ class Store:
                 )
         return account
 
-    def save_cycle(self, account: Account, signals: list[dict], summary: dict) -> None:
+    def save_cycle(self, account: Account, signals: list[dict], summary: dict, meta: dict | None = None) -> None:
         """Guarda de forma atómica todo lo que ha cambiado en un ciclo de análisis."""
         with self._lock, self._db:
+            for key, value in (meta or {}).items():
+                self._set(key, value)
             self._set("cash", account.cash)
             self._db.execute("DELETE FROM positions")
             self._db.executemany(
@@ -106,7 +120,7 @@ class Store:
             self._db.executemany(
                 "INSERT INTO signals VALUES(?,?,?,?,?,?,?,?)",
                 [(s["symbol"], s["ts"], s["price"], s["score_pct"], s["passed"], s["total"],
-                  s["status"], json.dumps(s["results"])) for s in signals],
+                  s["status"], json.dumps({k: s.get(k) for k in _SIGNAL_EXTRA})) for s in signals],
             )
             self._db.execute("INSERT INTO equity VALUES(?,?,?)", (summary["ts"], account.equity, account.cash))
             self._set("last_cycle", summary)
@@ -144,6 +158,6 @@ class Store:
         out = []
         for r in rows:
             d = dict(r)
-            d["results"] = json.loads(d.pop("details"))
+            d.update(json.loads(d.pop("details")))
             out.append(d)
         return out

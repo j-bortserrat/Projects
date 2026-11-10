@@ -7,27 +7,36 @@ Uso:
 Variables de entorno:
     DATA_PROVIDER       yahoo (por defecto) | synthetic
     BOT_DB              ruta de la base de datos (por defecto data/bot.db)
-    AUTO_CYCLE_MINUTES  cada cuántos minutos analiza solo (por defecto 30; 0 = nunca)
+    AUTO_CYCLE_MINUTES  cada cuántos minutos analiza solo (por defecto 15; 0 = nunca)
     HOST / PORT         por defecto 127.0.0.1:5000
+    PANEL_PASSWORD      contraseña del panel (obligatoria si HOST no es local)
+    TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   alertas de compras y ventas (opcional)
 """
 from __future__ import annotations
 
+import hmac
 import os
+import sys
 import threading
 import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from bot.backtest import run_backtest
 from bot.config import SettingsError, validate_settings
 from bot.data import make_provider
 from bot.engine import run_cycle
+from bot.notify import notify_cycle, telegram_configured
 from bot.store import Store
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
-def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: float = 0) -> Flask:
+def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: float = 0,
+               password: str | None = None) -> Flask:
     app = Flask(__name__)
     provider = provider or make_provider(os.environ.get("DATA_PROVIDER"))
     store = Store(db_path or os.environ.get("BOT_DB") or os.path.join(BASE_DIR, "data", "bot.db"))
@@ -35,7 +44,16 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
 
     def do_cycle() -> dict:
         with cycle_lock:
-            return run_cycle(provider, store)
+            summary = run_cycle(provider, store)
+        notify_cycle(summary)
+        return summary
+
+    if password:
+        @app.before_request
+        def require_password():
+            auth = request.authorization
+            if auth is None or not hmac.compare_digest((auth.password or "").encode(), password.encode()):
+                return Response("Contraseña necesaria", 401, {"WWW-Authenticate": 'Basic realm="Bot de inversion"'})
 
     @app.get("/")
     def index():
@@ -48,9 +66,14 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
         initial = store.get_initial_cash()
         equity = account.equity
         positions = sorted((p.to_dict() for p in account.positions.values()), key=lambda p: -p["value"])
+        created = datetime.fromisoformat(store.get_meta("created_at"))
+        months = max(0.0, (datetime.now(timezone.utc) - created).days / 30.44)
+        costs = months * s["monthly_cost"]
+        month_key = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m")
         return jsonify({
             "provider": provider.name,
             "auto_cycle_minutes": auto_cycle_minutes,
+            "telegram": telegram_configured(),
             "settings": s,
             "account": {
                 "initial_cash": initial,
@@ -61,14 +84,15 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
                 "pnl_pct": 100.0 * (equity - initial) / initial,
                 "realized_pnl": store.realized_pnl(),
                 "unrealized_pnl": sum(p["pnl"] for p in positions),
+                "created_at": created.isoformat(timespec="seconds"),
+                "costs_to_date": costs,
+                "net_pnl": equity - initial - costs,
             },
+            "rebalance_pending": s["strategy"] == "rotation" and store.get_meta("last_rebalance") != month_key,
             "positions": positions,
             "trades": store.trades(200),
             "equity": store.equity_history(),
-            "signals": sorted(
-                store.signals(),
-                key=lambda g: (g["score_pct"] is None, -(g["score_pct"] or 0), g["symbol"]),
-            ),
+            "signals": store.signals(),
             "last_cycle": store.get_last_cycle(),
         })
 
@@ -96,14 +120,21 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
 
     @app.get("/api/backtest")
     def backtest():
+        """Simula los ajustes actuales. `strategy` permite probar la otra estrategia sin guardarla."""
         try:
-            years = float(request.args.get("years", 3))
+            years = float(request.args.get("years", 5))
         except ValueError:
             return jsonify({"error": "years debe ser un número"}), 400
         if not 0.5 <= years <= 15:
             return jsonify({"error": "years debe estar entre 0.5 y 15"}), 400
+        settings = store.get_settings()
+        if "strategy" in request.args:
+            try:
+                settings = validate_settings({"strategy": request.args["strategy"]}, settings)
+            except SettingsError as exc:
+                return jsonify({"error": str(exc)}), 400
         try:
-            return jsonify(run_backtest(provider, store.get_settings(), years))
+            return jsonify(run_backtest(provider, settings, years))
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
 
@@ -121,8 +152,21 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
     return app
 
 
-if __name__ == "__main__":
-    minutes = float(os.environ.get("AUTO_CYCLE_MINUTES", "30"))
+def main() -> None:
+    minutes = float(os.environ.get("AUTO_CYCLE_MINUTES", "15"))
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "5000"))
-    create_app(auto_cycle_minutes=minutes).run(host=host, port=port, debug=False)
+    password = os.environ.get("PANEL_PASSWORD") or None
+    if host not in LOCAL_HOSTS and not password:
+        sys.exit("Por seguridad, define PANEL_PASSWORD para abrir el panel fuera de este equipo (HOST=%s)." % host)
+    app = create_app(auto_cycle_minutes=minutes, password=password)
+    print(f"Panel en http://{host}:{port}  (Ctrl+C para parar)")
+    try:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=4)
+    except ImportError:
+        app.run(host=host, port=port, debug=False)
+
+
+if __name__ == "__main__":
+    main()

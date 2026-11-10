@@ -35,5 +35,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["vol_ratio"] = volume.rolling(20).mean() / volume.rolling(60).mean().replace(0, np.nan)
     out["high52"] = df["High"].rolling(MIN_BARS).max()
     out["ret63"] = close.pct_change(63)
+    out["ret126"] = close.pct_change(126)
+    out["ret252"] = close.pct_change(252)
     out["vol30"] = close.pct_change().rolling(30).std() * np.sqrt(252)
     return out

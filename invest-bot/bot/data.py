@@ -22,6 +22,7 @@ class DataError(RuntimeError):
 
 class YahooProvider:
     name = "yahoo"
+    real_time = True  # la última vela puede estar a medias y solo se opera con la bolsa abierta
 
     def __init__(self, ttl_seconds: int = 900):
         self.ttl = ttl_seconds

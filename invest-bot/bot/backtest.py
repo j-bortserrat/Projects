@@ -14,7 +14,8 @@ import math
 
 import pandas as pd
 
-from .engine import build_signal, check_exit, rank_candidates
+from .engine import (build_signal, buy_reason, check_exit, market_is_bullish, plan_rotation,
+                     position_amount, rank_candidates)
 from .indicators import compute_indicators
 from .portfolio import Account
 
@@ -30,6 +31,14 @@ def _max_drawdown_pct(values: list[float]) -> float:
     return 100.0 * worst
 
 
+def _sharpe(values: list[float]) -> float | None:
+    """Rentabilidad por unidad de riesgo (anualizada, sin tipo libre de riesgo)."""
+    rets = pd.Series(values).pct_change().dropna()
+    if len(rets) < 20 or rets.std() == 0:
+        return None
+    return float(rets.mean() / rets.std() * math.sqrt(252))
+
+
 def _downsample(points: list[dict], max_points: int = 300) -> list[dict]:
     if len(points) <= max_points:
         return points
@@ -40,21 +49,57 @@ def _downsample(points: list[dict], max_points: int = 300) -> list[dict]:
     return picked
 
 
-def run_backtest(provider, settings: dict, years: float = 3.0) -> dict:
+def _by_year(dates: list, bot: list[float], market: list[float | None]) -> list[dict]:
+    """Rentabilidad del bot y del índice en cada año natural."""
+    out = []
+    frame = pd.DataFrame({"bot": bot, "market": market}, index=pd.DatetimeIndex(dates))
+    prev = None
+    for year, chunk in frame.groupby(frame.index.year):
+        start = chunk.iloc[0] if prev is None else prev
+        end = chunk.iloc[-1]
+        row = {"year": int(year), "bot_pct": 100.0 * (end["bot"] / start["bot"] - 1), "market_pct": None}
+        if pd.notna(start["market"]) and pd.notna(end["market"]) and start["market"] > 0:
+            row["market_pct"] = 100.0 * (end["market"] / start["market"] - 1)
+        out.append(row)
+        prev = end
+    return out
+
+
+def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict:
+    """Simula `years` años que terminan en `end` (por defecto, el último dato disponible)."""
     s = settings
+    end = None if end is None else pd.Timestamp(end)
     days = int(years * 365) + WARMUP_DAYS
+    if end is not None:
+        days += max(0, (pd.Timestamp.today().normalize() - end).days)
+
+    def load(sym: str) -> pd.DataFrame:
+        ind = compute_indicators(provider.history(sym, days))
+        return ind if end is None else ind[ind.index <= end]
+
     rows: dict[str, dict] = {}       # symbol -> {fecha -> indicadores}
     closes: dict[str, pd.Series] = {}
     errors: dict[str, str] = {}
     for sym in s["universe"]:
         try:
-            ind = compute_indicators(provider.history(sym, days))
+            ind = load(sym)
+            if ind.empty:
+                raise RuntimeError("sin datos en el periodo")
             rows[sym] = ind.to_dict("index")
             closes[sym] = ind["close"]
         except Exception as exc:
             errors[sym] = str(exc)
     if not rows:
         raise RuntimeError("No hay datos para ningún ticker del universo")
+
+    bench_sym = s["benchmark"]
+    bench_rows: dict = {}
+    bench_close: pd.Series | None = None
+    try:
+        bench_ind = load(bench_sym)
+        bench_rows, bench_close = bench_ind.to_dict("index"), bench_ind["close"]
+    except Exception as exc:
+        errors.setdefault(bench_sym, str(exc))
 
     all_dates = sorted(set().union(*(r.keys() for r in rows.values())))
     start = all_dates[-1] - pd.Timedelta(days=int(years * 365))
@@ -64,8 +109,11 @@ def run_backtest(provider, settings: dict, years: float = 3.0) -> dict:
     pending_sells: dict[str, tuple[str, float | None]] = {}  # symbol -> (motivo, score)
     pending_buys: list[dict] = []
     curve: list[dict] = []
+    exposure: list[float] = []
+    blocked_days = 0
 
-    for d in dates:
+    rotation = s["strategy"] == "rotation"
+    for i, d in enumerate(dates):
         ts = d.strftime("%Y-%m-%d")
         today = {sym: r[d] for sym, r in rows.items() if d in r}
 
@@ -79,9 +127,10 @@ def run_backtest(provider, settings: dict, years: float = 3.0) -> dict:
             if len(account.positions) >= s["max_positions"]:
                 break
             if sym in today and not math.isnan(today[sym]["open"]):
-                reason = f"{sig['passed']}/{sig['total']} condiciones ({sig['score_pct']:.0f} %)"
-                if account.buy(sym, today[sym]["open"], s["position_size"], ts, sig["score_pct"], reason) is None:
+                amount = position_amount(account, s)
+                if amount <= 0:
                     break
+                account.buy(sym, today[sym]["open"], amount, ts, sig["score_pct"], buy_reason(sig, s))
         pending_buys = []
 
         # 2) Al cierre: valorar, y decidir las órdenes de mañana.
@@ -92,51 +141,84 @@ def run_backtest(provider, settings: dict, years: float = 3.0) -> dict:
             if sig is None or sym in pending_sells:
                 continue
             pos.mark(sig["price"])
-            reason = check_exit(pos, sig["price"], sig["score_pct"], s)
+            reason = check_exit(pos, sig["price"], None if rotation else sig["score_pct"], s)
             if reason:
                 pending_sells[sym] = (reason, sig["score_pct"])
-        pending_buys = rank_candidates(signals, set(account.positions), s)
 
-        curve.append({"ts": ts, "equity": account.equity})
+        market_ok = market_is_bullish(bench_rows.get(d)) if s["market_filter"] else True
+        if not market_ok:
+            blocked_days += 1
+        if rotation:
+            # Se rota con el último cierre de cada mes (y el primer día, para no empezar en efectivo).
+            month_end = i + 1 < len(dates) and dates[i + 1].month != d.month
+            if i == 0 or month_end:
+                rot_sells, candidates = plan_rotation(signals, set(account.positions), s)
+                for sym, reason in rot_sells.items():
+                    pending_sells.setdefault(sym, (reason, by_symbol[sym]["score_pct"]))
+                if market_ok:
+                    pending_buys = [c for c in candidates if c["symbol"] not in pending_sells]
+        elif market_ok:
+            pending_buys = rank_candidates(signals, set(account.positions), s)
 
-    # Referencia: comprar y mantener todo el universo a partes iguales.
+        equity = account.equity
+        curve.append({"ts": ts, "equity": equity})
+        exposure.append(1 - account.cash / equity if equity > 0 else 0.0)
+
+    initial = s["initial_cash"]
+    # Referencia 1: comprar y mantener el índice (p. ej. SPY).
+    market_values: list[float | None] = [None] * len(dates)
+    if bench_close is not None:
+        series = bench_close.reindex(dates).ffill().bfill()
+        if series.notna().all():
+            market_values = [float(v) for v in series / series.iloc[0] * initial]
+    # Referencia 2: comprar y mantener todo el universo a partes iguales.
     panel = pd.DataFrame(closes).reindex(dates).ffill()
-    first = panel.bfill().iloc[0]
-    bench = (panel / first).mean(axis=1) * s["initial_cash"]
-    bench_values = [float(v) for v in bench]
+    universe_values = [float(v) for v in (panel / panel.bfill().iloc[0]).mean(axis=1) * initial]
 
     equity_values = [p["equity"] for p in curve]
-    final = equity_values[-1]
+    for point, m, u in zip(curve, market_values, universe_values):
+        point["market"] = m
+        point["universe"] = u
+
     span_years = max((dates[-1] - dates[0]).days / 365.25, 1e-9)
     sells = [t for t in account.trades if t["side"] == "SELL"]
     wins = [t for t in sells if t["pnl"] > 0]
     losses = [t for t in sells if t["pnl"] <= 0]
+    gross_win = sum(t["pnl"] for t in wins)
+    gross_loss = -sum(t["pnl"] for t in losses)
 
-    def cagr(end_value: float) -> float:
-        return 100.0 * ((end_value / s["initial_cash"]) ** (1 / span_years) - 1)
-
-    for point, b in zip(curve, bench_values):
-        point["benchmark"] = b
+    def stats(values: list) -> dict | None:
+        if values[-1] is None:
+            return None
+        return {
+            "final": values[-1],
+            "total_return_pct": 100.0 * (values[-1] / initial - 1),
+            "cagr_pct": 100.0 * ((values[-1] / initial) ** (1 / span_years) - 1),
+            "max_drawdown_pct": _max_drawdown_pct(values),
+            "sharpe": _sharpe(values),
+        }
 
     return {
         "provider": provider.name,
+        "strategy": s["strategy"],
         "years": years,
         "start": dates[0].strftime("%Y-%m-%d"),
         "end": dates[-1].strftime("%Y-%m-%d"),
-        "initial_cash": s["initial_cash"],
-        "final_equity": final,
-        "total_return_pct": 100.0 * (final / s["initial_cash"] - 1),
-        "cagr_pct": cagr(final),
-        "max_drawdown_pct": _max_drawdown_pct(equity_values),
-        "benchmark_return_pct": 100.0 * (bench_values[-1] / s["initial_cash"] - 1),
-        "benchmark_cagr_pct": cagr(bench_values[-1]),
-        "benchmark_max_drawdown_pct": _max_drawdown_pct(bench_values),
+        "initial_cash": initial,
+        "benchmark": bench_sym,
+        "bot": stats(equity_values),
+        "market": stats(market_values),
+        "universe": stats(universe_values),
+        "avg_exposure_pct": 100.0 * sum(exposure) / len(exposure),
+        "market_filter_blocked_pct": 100.0 * blocked_days / len(dates) if s["market_filter"] else None,
         "trades_closed": len(sells),
         "open_positions": len(account.positions),
         "win_rate_pct": 100.0 * len(wins) / len(sells) if sells else None,
         "avg_win_pct": sum(t["pnl_pct"] for t in wins) / len(wins) if wins else None,
         "avg_loss_pct": sum(t["pnl_pct"] for t in losses) / len(losses) if losses else None,
+        "profit_factor": gross_win / gross_loss if gross_loss > 0 else None,
         "fees_paid": sum(t["fee"] for t in account.trades),
+        "by_year": _by_year(dates, equity_values, market_values),
         "curve": _downsample(curve),
         "last_trades": account.trades[-30:][::-1],
         "errors": errors,
