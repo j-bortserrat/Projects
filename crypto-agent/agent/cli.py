@@ -97,7 +97,12 @@ def cmd_backtest(s: Settings, args) -> int:
         return 0
     b, h = r["bot"], r["btc_hold"]
     print(f"\nBacktest {r['start']} → {r['end']} · {r['candles']} velas de {r['timeframe']} · REFLEX {r['reflex']}")
-    print("SUPERA a mantener BTC." if r["beats_btc"] else "NO supera a mantener BTC (tras comisiones y deslizamiento).")
+    if r["trades"] == 0 and r["open_positions_at_end"] == 0:
+        print("El agente NO OPERÓ en este periodo: se quedó en efectivo por falta de evidencia de ventaja.")
+    elif r["beats_btc"]:
+        print("Supera a mantener BTC en este periodo (tras comisiones y deslizamiento).")
+    else:
+        print("NO supera a mantener BTC (tras comisiones y deslizamiento).")
     print(f"  Agente        {b['total_return_pct']:+8.1f} %   anual {b['cagr_pct']:+7.1f} %   peor caída -{b['max_drawdown_pct']:.1f} %")
     print(f"  Mantener BTC  {h['total_return_pct']:+8.1f} %   anual {h['cagr_pct']:+7.1f} %   peor caída -{h['max_drawdown_pct']:.1f} %")
     wr = "—" if r["win_rate_pct"] is None else f"{r['win_rate_pct']:.0f} %"
