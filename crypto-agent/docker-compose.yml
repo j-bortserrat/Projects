@@ -1,0 +1,12 @@
+# Arranque:  docker compose up -d --build     Registro:  docker compose logs -f
+# El estado vive en ./data, así que sobrevive a reinicios y a reconstruir la imagen.
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env          # claves opcionales (ANTHROPIC_API_KEY, TELEGRAM_*); nunca en el repositorio
+        required: false
+    volumes:
+      - ./data:/app/data
+      - ./config.toml:/app/config.toml:ro

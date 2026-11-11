@@ -1,0 +1,5 @@
+ccxt>=4.4
+pydantic>=2.7
+numpy>=1.26
+anthropic>=1.0
+pytest>=8.0

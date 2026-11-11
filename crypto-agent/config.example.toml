@@ -1,0 +1,43 @@
+# Copia este fichero como config.toml y cambia lo que quieras. Todo es opcional:
+# lo que no pongas toma el valor por defecto.
+
+mode = "paper"            # solo simulación; el modo real no está implementado
+data_dir = "data"
+
+[exchange]
+id = "binance"
+market = "spot"
+timeframe = "1h"          # 15m | 1h | 4h | 1d
+# Si tu red bloquea api.binance.com, usa el servidor público de datos:
+# public_api_url = "https://data-api.binance.vision/api/v3"
+
+[universe]
+symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "LINK/USDT"]
+off_limits = ["DOGE/USDT", "SHIB/USDT", "PEPE/USDT", "BONK/USDT", "WIF/USDT", "FLOKI/USDT"]
+min_quote_volume_24h = 20000000
+
+[paper]
+balance = 1000            # dinero ficticio inicial
+fee_bps = 10              # comisión por operación: 0,10 %
+slippage_bps = 5          # deslizamiento: 0,05 %
+
+[risk]                    # límites duros: el modelo no puede cambiarlos
+risk_per_trade_pct = 2
+max_daily_loss_pct = 5
+max_open_positions = 3
+kill_switch_drawdown_pct = 15
+pause_below_confidence = 0.60
+
+[policy]                  # hipótesis de partida; la revisión nocturna propone cambios
+min_setup_quality = 2
+min_direction_confidence = 0.80
+kelly_fraction = 0.25     # máximo permitido: un cuarto de Kelly
+stop_atr = 2.0
+target_r = 2.0
+max_hold_candles = 48
+
+[reflex]
+provider = "auto"         # auto: Haiku si existe ANTHROPIC_API_KEY; si no, reglas
+model = "claude-haiku-5-5"
+effort = "low"
+timeout_s = 20

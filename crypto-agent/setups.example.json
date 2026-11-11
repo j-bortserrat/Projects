@@ -1,0 +1,11 @@
+[
+  {
+    "symbol": "ETH/USDT",
+    "thesis": "Ejemplo de ficha. Sustituye este texto por una tesis propia y fechada.",
+    "catalysts": ["Catalizador confirmado, con su fuente"],
+    "bear_case": "Qué tendría que pasar para que la tesis fuera falsa.",
+    "invalidation_price": 1500.0,
+    "reviewed_on": "2026-11-10",
+    "sources": [{"title": "Fuente primaria", "url": "https://example.com", "date": "2026-11-01"}]
+  }
+]
