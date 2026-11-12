@@ -120,6 +120,11 @@
       <canvas id="chart-equity"></canvas>
       <div class="sub" id="equity-note"></div>
     </div>
+    <div class="card hidden" id="weights-card">
+      <h2>Pesos de la cartera</h2>
+      <div class="sub" id="weights-note"></div>
+      <div class="scroll" id="weights" style="margin-top:10px"></div>
+    </div>
     <div class="card">
       <h2>Posiciones abiertas</h2>
       <div class="scroll" id="positions"></div>
@@ -147,16 +152,16 @@
       <div class="row" style="margin-top:0">
         <label style="width:150px">Periodo
           <select id="bt-years">
-            <option value="1">1 año</option><option value="3">3 años</option>
-            <option value="5" selected>5 años</option><option value="10">10 años</option>
+            <option value="3">3 años</option><option value="5">5 años</option>
+            <option value="10" selected>10 años</option><option value="20">20 años (o lo que haya)</option>
           </select>
         </label>
         <button id="btn-backtest" style="align-self:flex-end">Ejecutar backtest</button>
       </div>
       <ul class="notes">
-        <li>Compara tu estrategia actual, la otra estrategia y simplemente comprar el índice y no tocarlo.</li>
+        <li>Compara tu estrategia con las otras dos y con simplemente comprar el índice y no tocarlo.</li>
         <li>Decide con el cierre de cada día y ejecuta a la apertura del día siguiente.</li>
-        <li>Usa los tickers que existen hoy, elegidos sabiendo cuáles han ido bien: el resultado real habría sido peor.</li>
+        <li>Usa ETFs que existen hoy. Los ETFs que cerraron por el camino no aparecen, lo que favorece algo al resultado.</li>
         <li>Un buen resultado pasado no garantiza nada sobre el futuro.</li>
       </ul>
     </div>
@@ -167,31 +172,56 @@
     <div class="card">
       <h2>Ajustes del bot</h2>
       <form id="settings-form" class="stack">
+        <div class="row" style="margin-top:0">
+          <label style="flex:1 1 280px">Cargar un ejemplo
+            <select id="preset"><option value="">— elige uno para rellenar el formulario —</option></select>
+          </label>
+          <span class="sub" id="preset-note" style="flex:2 1 280px;align-self:flex-end"></span>
+        </div>
         <label>Estrategia
           <select name="strategy">
-            <option value="rotation">Rotación mensual: mantener los tickers más fuertes (recomendada)</option>
+            <option value="allocation">Cartera fija: pesos objetivo y reequilibrio, como una cartera de fondos (recomendada)</option>
+            <option value="rotation">Rotación mensual: mantener los ETFs más fuertes</option>
             <option value="checklist">Lista de condiciones: comprar cuando se cumple casi todo</option>
           </select>
         </label>
-        <label>Tickers a vigilar (separados por comas o espacios)
-          <textarea name="universe" spellcheck="false"></textarea>
-        </label>
+
+        <fieldset data-strategy="allocation"><legend>Cartera fija</legend>
+          <div class="stack">
+            <label>ETFs y su peso en % (deben sumar 100). Ejemplo: VT 60, BND 40
+              <textarea name="allocation" spellcheck="false" style="min-height:56px"></textarea>
+            </label>
+            <div class="grid2">
+              <label>Reequilibrar si un peso se desvía más de (puntos)<input name="rebalance_band_pct" type="number" step="any"></label>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset data-strategy="rotation checklist"><legend>ETFs a vigilar</legend>
+          <label>Tickers separados por comas o espacios
+            <textarea name="universe" spellcheck="false"></textarea>
+          </label>
+        </fieldset>
 
         <fieldset><legend>Cartera</legend>
           <div class="grid2">
-            <label>Máximo de posiciones abiertas<input name="max_positions" type="number" step="1"></label>
-            <label>Tamaño de cada compra
+            <label>Capital inicial (se aplica al reiniciar)<input name="initial_cash" type="number" step="any"></label>
+            <label>Aportación mensual (0 = ninguna)<input name="monthly_contribution" type="number" step="any"></label>
+            <label>Moneda que se muestra
+              <select name="currency"><option value="USD">Dólares ($)</option><option value="EUR">Euros (€)</option></select>
+            </label>
+            <label>Comisión simulada por operación (%)<input name="fee_pct" type="number" step="any"></label>
+            <label>Tus gastos mensuales (servidor, datos…)<input name="monthly_cost" type="number" step="any"></label>
+            <label>Índice de referencia<input name="benchmark" spellcheck="false"></label>
+            <label data-strategy="rotation checklist">Máximo de posiciones abiertas<input name="max_positions" type="number" step="1"></label>
+            <label data-strategy="rotation checklist">Tamaño de cada compra
               <select name="sizing_mode">
                 <option value="percent">Un % del valor de la cartera (reinvierte ganancias)</option>
                 <option value="fixed">Un importe fijo</option>
               </select>
             </label>
-            <label data-sizing="percent">% de la cartera por compra<input name="position_pct" type="number" step="any"></label>
-            <label data-sizing="fixed">Importe de cada compra ($)<input name="position_size" type="number" step="any"></label>
-            <label>Comisión simulada por operación (%)<input name="fee_pct" type="number" step="any"></label>
-            <label>Capital inicial ($; se aplica al reiniciar)<input name="initial_cash" type="number" step="any"></label>
-            <label>Tus gastos mensuales ($: servidor, datos…)<input name="monthly_cost" type="number" step="any"></label>
-            <label>Índice de referencia<input name="benchmark" spellcheck="false"></label>
+            <label data-strategy="rotation checklist" data-sizing="percent">% de la cartera por compra<input name="position_pct" type="number" step="any"></label>
+            <label data-strategy="rotation checklist" data-sizing="fixed">Importe de cada compra<input name="position_size" type="number" step="any"></label>
           </div>
         </fieldset>
 
@@ -209,7 +239,7 @@
           </div>
         </fieldset>
 
-        <fieldset><legend>Protección</legend>
+        <fieldset data-strategy="rotation checklist"><legend>Protección</legend>
           <div class="grid2">
             <label>Stop-loss (% de pérdida máxima por posición)<input name="stop_loss_pct" type="number" step="any"></label>
             <label>Trailing stop (% desde el máximo; 0 = no)<input name="trailing_stop_pct" type="number" step="any"></label>
@@ -237,7 +267,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const money = (n) => (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const money = (n) => {
+  const digits = {minimumFractionDigits: 2, maximumFractionDigits: 2};
+  if (state && state.settings.currency === "EUR") return n.toLocaleString("es-ES", {...digits, useGrouping: "always"}) + " €";
+  return (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", digits);
+};
 const signedMoney = (n) => (n > 0 ? "+" : "") + money(n);
 const pct = (n, digits = 2) => (n > 0 ? "+" : "") + n.toFixed(digits) + " %";
 const cls = (n) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
@@ -246,7 +280,8 @@ const when = (ts) => {
   if (ts.length <= 10) return ts;
   return new Date(ts).toLocaleString("es-ES", {dateStyle: "short", timeStyle: "short"});
 };
-const STRATEGY = {rotation: "rotación mensual", checklist: "lista de condiciones"};
+const STRATEGY = {allocation: "cartera fija", rotation: "rotación mensual", checklist: "lista de condiciones"};
+const allocationText = (a) => Object.entries(a).map(([sym, pct]) => `${sym} ${pct}`).join(", ");
 
 let state = null;
 let openSignal = null;
@@ -319,8 +354,9 @@ function renderHeader() {
   const source = state.provider === "yahoo" ? "Yahoo Finance" : "datos simulados";
   const auto = state.auto_cycle_minutes > 0 ? ` · análisis automático cada ${state.auto_cycle_minutes} min` : "";
   let rot = "";
-  if (s.strategy === "rotation") {
-    rot = state.rebalance_pending ? " · rotación de este mes pendiente" : " · próxima rotación: primera sesión del mes que viene";
+  if (s.strategy !== "checklist") {
+    const what = s.strategy === "rotation" ? "rotación" : "revisión";
+    rot = state.rebalance_pending ? ` · ${what} de este mes pendiente` : ` · próxima ${what}: primera sesión del mes que viene`;
   }
   $("status").textContent = `Estrategia: ${STRATEGY[s.strategy]}${rot} · ` +
     (lc ? `último análisis: ${when(lc.ts)}` : "todavía sin análisis") + ` · fuente: ${source}${auto}`;
@@ -342,23 +378,29 @@ function renderHeader() {
 function renderKpis() {
   const a = state.account, s = state.settings;
   const size = s.sizing_mode === "percent" ? `${s.position_pct} % por compra` : `${money(s.position_size)} por compra`;
+  const put = a.contributed > 0 ? `Aportado en total ${money(a.invested)}` : `Capital inicial ${money(a.initial_cash)}`;
   let html =
-    kpi("Valor total", money(a.equity), `Capital inicial ${money(a.initial_cash)}`) +
-    kpi("Ganancia / pérdida", signedMoney(a.pnl), pct(a.pnl_pct), cls(a.pnl));
+    kpi("Valor total", money(a.equity), put) +
+    kpi("Ganancia / pérdida", signedMoney(a.pnl), `Rentabilidad ${pct(a.pnl_pct)}`, cls(a.pnl));
   if (s.monthly_cost > 0) {
     html += kpi("Tras tus gastos", signedMoney(a.net_pnl), `Gastos acumulados ${money(a.costs_to_date)}`, cls(a.net_pnl));
   }
   html +=
-    kpi("Efectivo disponible", money(a.cash), `Invertido ${money(a.invested)}`) +
-    kpi("Ya realizado (ventas)", signedMoney(a.realized_pnl), `Latente ${signedMoney(a.unrealized_pnl)}`, cls(a.realized_pnl)) +
-    kpi("Posiciones", `${state.positions.length} / ${s.max_positions}`, size);
+    kpi("Efectivo disponible", money(a.cash), `En ETFs ${money(a.in_positions)}`) +
+    kpi("Ya realizado (ventas)", signedMoney(a.realized_pnl), `Latente ${signedMoney(a.unrealized_pnl)}`, cls(a.realized_pnl));
+  html += s.strategy === "allocation"
+    ? kpi("ETFs en cartera", `${state.positions.length} / ${Object.keys(s.allocation).length}`,
+          s.monthly_contribution > 0 ? `Aportas ${money(s.monthly_contribution)} al mes` : `Banda de ${s.rebalance_band_pct} puntos`)
+    : kpi("Posiciones", `${state.positions.length} / ${s.max_positions}`, size);
   $("kpis").innerHTML = html;
 }
 
 function renderPositions() {
   if (!state.positions.length) {
-    $("positions").innerHTML = `<div class="empty">Sin posiciones todavía. ${state.settings.strategy === "rotation"
-      ? "El bot entra en la primera sesión de bolsa tras arrancar y después rota una vez al mes."
+    const st = state.settings.strategy;
+    $("positions").innerHTML = `<div class="empty">Sin posiciones todavía. ${st === "allocation"
+      ? "El bot invierte según los pesos objetivo en la primera sesión de bolsa tras arrancar."
+      : st === "rotation" ? "El bot entra en la primera sesión de bolsa tras arrancar y después rota una vez al mes."
       : `El bot solo compra cuando un ticker cumple al menos el ${state.settings.buy_threshold_pct} % de las condiciones.`}</div>`;
     return;
   }
@@ -372,29 +414,49 @@ function renderPositions() {
       <td class="r num ${cls(p.pnl)}">${pct(p.pnl_pct)}</td><td>${when(p.opened_at)}</td></tr>`).join("") + `</tbody></table>`;
 }
 
+function renderWeights() {
+  const card = $("weights-card"), s = state.settings;
+  card.classList.toggle("hidden", s.strategy !== "allocation");
+  if (s.strategy !== "allocation") return;
+  const band = s.rebalance_band_pct;
+  $("weights-note").textContent = `Una vez al mes el bot comprueba los pesos. Si alguno se ha desviado más de ${band} puntos, ` +
+    "vende lo que sobra y compra lo que falta. El dinero nuevo siempre va a lo que está por debajo de su peso.";
+  $("weights").innerHTML = `<table><thead><tr><th>ETF</th><th class="r">Peso objetivo</th><th class="r">Peso actual</th>
+    <th class="r">Desviación</th><th class="r">Valor</th><th></th></tr></thead><tbody>` + state.weights.map((w) => {
+    const out = Math.abs(w.drift_pct) > band;
+    return `<tr><td><b>${esc(w.symbol)}</b></td><td class="r num">${w.target_pct.toFixed(1)} %</td>
+      <td class="r num">${w.actual_pct.toFixed(1)} %</td>
+      <td class="r num ${out ? "neg" : ""}">${(w.drift_pct > 0 ? "+" : "") + w.drift_pct.toFixed(1)} pts</td>
+      <td class="r num">${money(w.value)}</td>
+      <td>${w.target_pct === 0 ? `<span class="chip sell">Se venderá</span>` : out && w.value > 0 ? `<span class="chip no">Fuera de banda</span>` : ""}</td></tr>`;
+  }).join("") + `</tbody></table>`;
+}
+
 function renderEquity() {
   const eq = state.equity;
-  const base = eq.map(() => state.account.initial_cash);
+  const base = eq.map((e) => e.invested ?? state.account.initial_cash);
   drawChart($("chart-equity"), [
     {values: base, color: "--muted", width: 1, dash: [4, 4]},
     {values: eq.map((e) => e.equity), color: "--accent"},
   ], eq.map((e) => when(e.ts)));
   $("equity-note").textContent = eq.length < 2
     ? "Se añade un punto cada vez que el bot hace un análisis."
-    : "Línea discontinua: capital inicial.";
+    : "Línea discontinua: dinero que has puesto (capital inicial más aportaciones).";
 }
 
 function renderSignals() {
-  const s = state.settings, rot = s.strategy === "rotation";
-  const thr = rot ? s.rotation_min_score_pct : s.buy_threshold_pct;
+  const s = state.settings, rot = s.strategy === "rotation", alloc = s.strategy === "allocation";
+  const thr = alloc ? 0 : rot ? s.rotation_min_score_pct : s.buy_threshold_pct;
   const held = new Set(state.positions.map((p) => p.symbol));
-  $("signals-title").textContent = rot ? "Ranking de fuerza (momentum)" : "Condiciones por ticker";
+  $("signals-title").textContent = alloc ? "Estado de tus ETFs" : rot ? "Ranking de fuerza (momentum)" : "Condiciones por ticker";
   if (!state.signals.length) {
     $("signals-note").textContent = "";
     $("signals").innerHTML = `<div class="empty">Pulsa «Analizar ahora» para evaluar los tickers.</div>`;
     return;
   }
-  $("signals-note").textContent = rot
+  $("signals-note").textContent = alloc
+    ? "Solo informativo: una cartera fija no compra ni vende por estas señales, mantiene sus pesos. Pulsa una fila para ver las condiciones."
+    : rot
     ? `Cada mes el bot se queda con los ${s.max_positions} tickers de mayor momentum (media de la rentabilidad a 3, 6 y 12 meses)` +
       (s.rotation_min_score_pct > 0 ? ` que cumplan al menos el ${thr} % de las condiciones (marca vertical)` : "") +
       (s.trend_filter ? " y estén sobre su media de 200 días" : "") + ". Pulsa una fila para ver las condiciones."
@@ -405,12 +467,16 @@ function renderSignals() {
   $("signals").innerHTML = `<table><thead><tr><th>${rot ? "Puesto" : ""}</th><th>Ticker</th><th class="r">Precio</th>
     <th class="r">Momentum</th><th>Condiciones</th><th class="r"></th><th>Estado</th></tr></thead><tbody>` + signals.map((g) => {
     if (g.score_pct === null) {
+      const tag = alloc && held.has(g.symbol) ? `<span class="chip held">En cartera</span>` : `<span class="chip no">Sin evaluar</span>`;
       return `<tr><td></td><td><b>${esc(g.symbol)}</b></td><td class="r num">${g.price === null ? "—" : money(g.price)}</td>
-        <td colspan="3" class="sub">${esc(g.status)}</td><td><span class="chip no">Sin evaluar</span></td></tr>`;
+        <td colspan="3" class="sub">${esc(g.status)}</td><td>${tag}</td></tr>`;
     }
     const hit = g.score_pct >= thr - 1e-9;
     let chip;
-    if (rot) {
+    if (alloc) {
+      chip = (held.has(g.symbol) ? `<span class="chip held">En cartera</span> ` : "") +
+        `<span class="sub">${g.trend_ok ? "sobre" : "bajo"} su media de 200 días</span>`;
+    } else if (rot) {
       const why = g.rank ? `puesto ${g.rank}` : g.mom === null ? "sin historia de 12 meses"
         : !g.trend_ok && s.trend_filter ? "bajo su media de 200 días" : "pocas condiciones";
       chip = held.has(g.symbol)
@@ -453,25 +519,40 @@ function renderTrades() {
 
 function syncFormVisibility() {
   const f = $("settings-form");
-  f.querySelectorAll("[data-strategy]").forEach((el) => el.classList.toggle("hidden", el.dataset.strategy !== f.elements.strategy.value));
-  f.querySelectorAll("[data-sizing]").forEach((el) => el.classList.toggle("hidden", el.dataset.sizing !== f.elements.sizing_mode.value));
+  const strategy = f.elements.strategy.value, sizing = f.elements.sizing_mode.value;
+  f.querySelectorAll("[data-strategy], [data-sizing]").forEach((el) => {
+    const okStrategy = !el.dataset.strategy || el.dataset.strategy.split(" ").includes(strategy);
+    const okSizing = !el.dataset.sizing || el.dataset.sizing === sizing;
+    el.classList.toggle("hidden", !(okStrategy && okSizing));
+  });
+}
+
+function fillForm(values) {
+  const f = $("settings-form");
+  for (const el of f.elements) {
+    if (!el.name || !(el.name in values)) continue;
+    const v = values[el.name];
+    if (el.type === "checkbox") el.checked = !!v;
+    else el.value = el.name === "universe" ? v.join(", ") : el.name === "allocation" ? allocationText(v) : v;
+  }
+  syncFormVisibility();
 }
 
 function fillSettings() {
-  const f = $("settings-form"), s = state.settings;
-  for (const el of f.elements) {
-    if (!el.name) continue;
-    if (el.type === "checkbox") el.checked = !!s[el.name];
-    else el.value = el.name === "universe" ? s.universe.join(", ") : s[el.name];
+  fillForm(state.settings);
+  const preset = $("preset");
+  if (preset.options.length === 1) {
+    for (const p of state.presets) preset.add(new Option(p.name, p.id));
   }
-  syncFormVisibility();
+  preset.value = "";
+  $("preset-note").textContent = "";
   $("telegram-note").textContent = state.telegram
     ? "Alertas de Telegram activadas: recibirás un mensaje con cada compra y venta."
     : "Alertas de Telegram sin configurar (ver README: variables TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID).";
 }
 
 function render(refillForm) {
-  renderHeader(); renderKpis(); renderPositions(); renderEquity(); renderSignals(); renderTrades();
+  renderHeader(); renderKpis(); renderWeights(); renderPositions(); renderEquity(); renderSignals(); renderTrades();
   if (refillForm) fillSettings();
 }
 
@@ -515,11 +596,18 @@ $("btn-cycle").addEventListener("click", async () => {
 });
 
 $("settings-form").addEventListener("change", syncFormVisibility);
+$("preset").addEventListener("change", (e) => {
+  const preset = state.presets.find((p) => p.id === e.target.value);
+  if (!preset) { $("preset-note").textContent = ""; return; }
+  fillForm(preset.settings);
+  $("preset-note").textContent = preset.note + " Pulsa «Guardar ajustes» para aplicarlo.";
+});
 $("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const body = {};
   for (const el of e.target.elements) {
     if (el.name) body[el.name] = el.type === "checkbox" ? el.checked : el.value;
+    // los campos de la estrategia que no está elegida se envían igual: conservan su valor
   }
   const msg = $("settings-msg");
   try {
@@ -538,13 +626,15 @@ $("btn-reset").addEventListener("click", async () => {
 
 /* ---------- backtest ---------- */
 let lastBacktest = null;
+const BT_COLORS = ["--accent", "--alt", "--good"];
 function drawBacktest() {
-  const {main, other} = lastBacktest;
-  drawChart($("chart-bt"), [
-    {values: main.curve.map((p) => p.market), color: "--muted", width: 1.5},
-    {values: other.curve.map((p) => p.equity), color: "--alt", width: 1.5},
-    {values: main.curve.map((p) => p.equity), color: "--accent", width: 2.5},
-  ], main.curve.map((p) => p.ts));
+  const {runs} = lastBacktest, main = runs[0].result;
+  const series = [{values: main.curve.map((p) => p.market), color: "--muted", width: 1.5}];
+  runs.slice().reverse().forEach((run, i) => {
+    const k = runs.length - 1 - i;
+    series.push({values: run.result.curve.map((p) => p.equity), color: BT_COLORS[k], width: k === 0 ? 2.5 : 1.5});
+  });
+  drawChart($("chart-bt"), series, main.curve.map((p) => p.ts));
 }
 
 $("btn-backtest").addEventListener("click", async () => {
@@ -552,47 +642,65 @@ $("btn-backtest").addEventListener("click", async () => {
   btn.disabled = true; btn.textContent = "Calculando…";
   try {
     const years = $("bt-years").value;
-    const mine = state.settings.strategy, alt = mine === "rotation" ? "checklist" : "rotation";
-    const main = await api(`/api/backtest?years=${years}`);
-    const other = await api(`/api/backtest?years=${years}&strategy=${alt}`);
-    lastBacktest = {main, other};
+    const mine = state.settings.strategy;
+    const order = [mine, ...Object.keys(STRATEGY).filter((k) => k !== mine)];
+    const runs = [];
+    const failed = [];
+    for (const strategy of order) {
+      try {
+        runs.push({strategy, result: await api(`/api/backtest?years=${years}&strategy=${strategy}`)});
+      } catch (err) {
+        if (strategy === mine) throw err;
+        failed.push(`${STRATEGY[strategy]}: ${err.message}`);
+      }
+    }
+    lastBacktest = {runs};
+    const main = runs[0].result;
     const opt = (v, f) => (v === null || v === undefined ? "—" : f(v));
+    const label = (run, i) => (i === 0 ? "Tu estrategia" : "Alternativa") + `<br>(${STRATEGY[run.strategy]})`;
+    const cols = [...runs.map((r) => r.result.bot), main.market];
     const cell = (st, f, k) => `<td class="r num ${k && st ? cls(k(st)) : ""}">${st ? f(st) : "—"}</td>`;
-    const cols = [main.bot, other.bot, main.market, main.universe];
-    const line = (label, f, k) => `<tr><td>${label}</td>${cols.map((c) => cell(c, f, k)).join("")}</tr>`;
+    const line = (name, f, k) => `<tr><td>${name}</td>${cols.map((c) => cell(c, f, k)).join("")}</tr>`;
     const synthetic = main.provider !== "yahoo"
       ? `<div class="banner warn" style="margin-top:0"><b>Datos simulados:</b> este resultado no dice nada sobre el mercado real.</div>` : "";
-    const errors = Object.keys(main.errors).length
-      ? `<div class="banner err" style="margin-top:0">Sin datos para: ${Object.keys(main.errors).map(esc).join(", ")}</div>` : "";
+    const errorList = [...Object.keys(main.errors).map((k) => `sin datos de ${k}`), ...failed];
+    const errors = errorList.length
+      ? `<div class="banner err" style="margin-top:0">${errorList.map(esc).join(" · ")}</div>` : "";
     const beat = main.by_year.filter((y) => y.market_pct !== null && y.bot_pct > y.market_pct).length;
+    const negative = main.by_year.filter((y) => y.bot_pct < 0).length;
+    const sameSpan = runs.every((r) => r.result.start === main.start);
+    const contributions = main.contributed > 0
+      ? `<div class="sub" style="margin-top:8px">Con tus aportaciones: habrías puesto ${money(main.invested_total)} en total
+         y hoy tendrías ${money(main.final_value)}. Las rentabilidades de la tabla no cuentan el dinero aportado como ganancia.</div>` : "";
     out.innerHTML = synthetic + errors + `
       <div class="card">
-        <h2>${esc(main.start)} → ${esc(main.end)} · empezando con ${money(main.initial_cash)}</h2>
-        <div class="scroll"><table><thead><tr><th></th><th class="r">Tu estrategia<br>(${STRATEGY[mine]})</th>
-          <th class="r">La otra<br>(${STRATEGY[alt]})</th><th class="r">Comprar ${esc(main.benchmark)}<br>y no tocarlo</th>
-          <th class="r">Comprar todos<br>tus tickers</th></tr></thead><tbody>
+        <h2>${esc(main.start)} → ${esc(main.end)} · cada columna parte de ${money(main.initial_cash)}</h2>
+        <div class="scroll"><table><thead><tr><th></th>${runs.map((r, i) => `<th class="r">${label(r, i)}</th>`).join("")}
+          <th class="r">Comprar ${esc(main.benchmark)}<br>y no tocarlo</th></tr></thead><tbody>
           ${line("Valor final", (c) => money(c.final))}
-          ${line("Rentabilidad total", (c) => pct(c.total_return_pct, 1), (c) => c.total_return_pct)}
           ${line("Rentabilidad anual", (c) => pct(c.cagr_pct, 1), (c) => c.cagr_pct)}
           ${line("Peor caída", (c) => "-" + c.max_drawdown_pct.toFixed(1) + " %")}
           ${line("Rentabilidad por unidad de riesgo (Sharpe)", (c) => opt(c.sharpe, (v) => v.toFixed(2)))}
+          <tr><td>Ventas realizadas</td>${runs.map((r) => `<td class="r num">${r.result.trades_closed}</td>`).join("")}<td class="r num">0</td></tr>
+          <tr><td>Comisiones pagadas</td>${runs.map((r) => `<td class="r num">${money(r.result.fees_paid)}</td>`).join("")}<td class="r num">—</td></tr>
         </tbody></table></div>
         <canvas id="chart-bt" style="margin-top:14px"></canvas>
-        <div class="legend"><span><i style="background:var(--accent)"></i>Tu estrategia</span>
-          <span><i style="background:var(--alt)"></i>La otra estrategia</span>
+        <div class="legend">${runs.map((r, i) => `<span><i style="background:var(${BT_COLORS[i]})"></i>${i === 0 ? "Tu estrategia" : esc(STRATEGY[r.strategy])}</span>`).join("")}
           <span><i style="background:var(--muted)"></i>Comprar ${esc(main.benchmark)} y no tocarlo</span></div>
-        <div class="sub" style="margin-top:8px">Tu estrategia: ${main.trades_closed} operaciones cerradas,
-          ${opt(main.win_rate_pct, (v) => v.toFixed(0) + " %")} con ganancia
-          (media ${opt(main.avg_win_pct, (v) => pct(v, 1))} frente a ${opt(main.avg_loss_pct, (v) => pct(v, 1))} en las perdedoras),
-          invertido de media el ${main.avg_exposure_pct.toFixed(0)} % del capital, ${money(main.fees_paid)} en comisiones.</div>
+        ${sameSpan ? "" : `<div class="sub" style="margin-top:8px">Aviso: no todas las columnas empiezan el mismo día, porque algún ETF de la cartera fija es más reciente.</div>`}
+        ${contributions}
       </div>
       <div class="card">
-        <h2>Año a año · tu estrategia superó al índice en ${beat} de ${main.by_year.length} años</h2>
-        <div class="scroll"><table><thead><tr><th>Año</th><th class="r">Tu estrategia</th><th class="r">La otra</th>
-          <th class="r">${esc(main.benchmark)}</th></tr></thead><tbody>` + main.by_year.map((y, i) => `<tr>
-            <td>${y.year}</td><td class="r num ${cls(y.bot_pct)}">${pct(y.bot_pct, 1)}</td>
-            <td class="r num ${cls(other.by_year[i].bot_pct)}">${pct(other.by_year[i].bot_pct, 1)}</td>
-            <td class="r num ${y.market_pct === null ? "" : cls(y.market_pct)}">${opt(y.market_pct, (v) => pct(v, 1))}</td></tr>`).join("") + `
+        <h2>Año a año · tu estrategia acabó en negativo ${negative} de ${main.by_year.length} años y superó al índice en ${beat}</h2>
+        <div class="scroll"><table><thead><tr><th>Año</th>${runs.map((r, i) => `<th class="r">${i === 0 ? "Tu estrategia" : esc(STRATEGY[r.strategy])}</th>`).join("")}
+          <th class="r">${esc(main.benchmark)}</th></tr></thead><tbody>` + main.by_year.map((y) => {
+            const others = runs.slice(1).map((r) => {
+              const row = r.result.by_year.find((x) => x.year === y.year);
+              return row ? `<td class="r num ${cls(row.bot_pct)}">${pct(row.bot_pct, 1)}</td>` : `<td class="r num">—</td>`;
+            }).join("");
+            return `<tr><td>${y.year}</td><td class="r num ${cls(y.bot_pct)}">${pct(y.bot_pct, 1)}</td>${others}
+              <td class="r num ${y.market_pct === null ? "" : cls(y.market_pct)}">${opt(y.market_pct, (v) => pct(v, 1))}</td></tr>`;
+          }).join("") + `
         </tbody></table></div>
         <div class="sub" style="margin-top:8px">El primer y el último año pueden estar incompletos.</div>
       </div>

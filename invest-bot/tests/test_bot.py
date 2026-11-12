@@ -10,10 +10,11 @@ import pytest
 from app import create_app
 from bot import engine, notify
 from bot.backtest import run_backtest
-from bot.config import DEFAULT_SETTINGS, SettingsError, validate_settings
+from bot.config import DEFAULT_SETTINGS, PRESETS, SettingsError, parse_allocation, validate_settings
 from bot.data import SyntheticProvider
-from bot.engine import (check_exit, plan_rotation, position_amount, rank_candidates, run_cycle,
-                        split_live_bars, us_market_open)
+from bot.engine import (check_exit, execute_allocation, plan_allocation, plan_rotation, position_amount,
+                        rank_candidates, run_cycle, split_live_bars, us_market_open)
+from bot.markets import closed_exchanges, exchange_of
 from bot.indicators import compute_indicators, rsi
 from bot.portfolio import Account, Position
 from bot.rules import RULES, evaluate
@@ -128,10 +129,26 @@ def test_buy_and_sell_math_with_fees():
     assert buy["qty"] == pytest.approx(9.9) and acc.cash == pytest.approx(900.0)
     assert acc.buy("AAA", 10.0, 100.0, "t0", 90.0, "x") is None  # ya en cartera
     assert acc.equity == pytest.approx(999.0)  # se pierde la comisión de 1 $
+    assert acc.sell("NOPE", 10.0, "t1", None, "y") is None
     sell = acc.sell("AAA", 20.0, "t1", None, "y")
     assert sell["amount"] == pytest.approx(9.9 * 20 * 0.99)
     assert sell["pnl"] == pytest.approx(9.9 * 20 * 0.99 - 100)
     assert acc.cash == pytest.approx(900 + 196.02) and not acc.positions
+
+
+def test_adding_to_a_position_and_selling_part_of_it():
+    acc = Account(cash=1000.0, fee_pct=0.0)
+    acc.buy("AAA", 10.0, 100.0, "t0", 0.0, "x")
+    acc.buy("AAA", 20.0, 100.0, "t1", 0.0, "x", add=True)          # 10 + 5 participaciones por 200
+    pos = acc.positions["AAA"]
+    assert pos.qty == pytest.approx(15.0) and pos.cost == pytest.approx(200.0) and pos.avg_price == pytest.approx(200 / 15)
+    part = acc.sell("AAA", 20.0, "t2", None, "y", qty=6.0)            # vende 6 de 15
+    assert part["amount"] == pytest.approx(120.0) and part["pnl"] == pytest.approx(120 - 200 * 6 / 15)
+    assert pos.qty == pytest.approx(9.0) and pos.cost == pytest.approx(120.0) and acc.cash == pytest.approx(920.0)
+    assert acc.sell("AAA", 20.0, "t3", None, "y", qty=0) is None
+    rest = acc.sell("AAA", 20.0, "t3", None, "y", qty=999)            # pedir de más vende lo que hay
+    assert rest["qty"] == pytest.approx(9.0) and "AAA" not in acc.positions
+    assert acc.cash == pytest.approx(1100.0)                           # 200 invertidos, 300 recuperados
 
 
 def test_cannot_buy_without_cash():
@@ -189,6 +206,131 @@ def test_plan_rotation_picks_strongest_and_respects_filters():
     assert list(sells) == ["E"]                        # G no tiene datos hoy: no se toca
     _, buys = plan_rotation(signals, set(), {**s, "trend_filter": False, "rotation_min_score_pct": 0})
     assert [b["symbol"] for b in buys] == ["A", "B"]
+
+
+# --- cartera de pesos fijos -----------------------------------------------------
+ALLOC = validate_settings({"strategy": "allocation", "allocation": {"A": 60, "B": 40}, "fee_pct": 0})
+W = {"A": 0.6, "B": 0.4}
+
+
+def test_allocation_initial_investment_and_band():
+    acc = Account(cash=1000.0)
+    prices = {"A": 10.0, "B": 20.0}
+    orders = plan_allocation(acc, prices, W, ALLOC, force=True)
+    assert [(o[0], round(o[1], 2)) for o in orders] == [("B", 400.0), ("A", 600.0)]
+    execute_allocation(acc, orders, prices, "t")
+    assert acc.cash == pytest.approx(0.0) and acc.positions["A"].qty == pytest.approx(60.0)
+
+    # A sube un 15 %: pesos 63,3 / 36,7 -> dentro de la banda de 5 puntos, no se toca.
+    assert plan_allocation(acc, {"A": 11.5, "B": 20.0}, W, ALLOC) == []
+    # A sube un 30 %: pesos 66,1 / 33,9 -> fuera de banda: vende A y compra B hasta 60/40.
+    prices = {"A": 13.0, "B": 20.0}
+    orders = plan_allocation(acc, prices, W, ALLOC)
+    assert orders[0][0] == "A" and orders[0][1] < 0 < orders[1][1] and "Reequilibrio" in orders[0][2]
+    execute_allocation(acc, orders, prices, "t")
+    equity = acc.cash + acc.positions["A"].qty * 13 + acc.positions["B"].qty * 20
+    assert acc.positions["A"].qty * 13 / equity == pytest.approx(0.6) and acc.cash == pytest.approx(0.0, abs=1e-6)
+
+
+def test_allocation_new_cash_only_buys_what_is_underweight():
+    acc = Account(cash=1000.0)
+    prices = {"A": 10.0, "B": 20.0}
+    execute_allocation(acc, plan_allocation(acc, prices, W, ALLOC, force=True), prices, "t")
+    acc.cash += 100.0                                              # llega una aportación
+    prices = {"A": 11.0, "B": 20.0}                                # A está algo por encima de su peso
+    orders = plan_allocation(acc, prices, W, ALLOC)
+    assert orders and all(delta > 0 for _, delta, _ in orders)     # no vende nada
+    assert max(orders, key=lambda o: o[1])[0] == "B"               # la mayor parte va a lo que falta
+    assert sum(o[1] for o in orders) == pytest.approx(100.0)
+    acc.cash = 5.0                                                 # calderilla: no merece una orden
+    assert plan_allocation(acc, prices, W, ALLOC) == []
+
+
+def test_allocation_sells_what_no_longer_belongs_and_survives_fees():
+    s = {**ALLOC, "fee_pct": 0.5}
+    acc = Account(cash=1000.0, fee_pct=0.5)
+    acc.buy("OLD", 10.0, 500.0, "t", 0.0, "x")
+    prices = {"A": 10.0, "B": 20.0, "OLD": 10.0}
+    orders = plan_allocation(acc, prices, W, s)
+    assert orders[0][0] == "OLD" and "Ya no está" in orders[0][2]
+    execute_allocation(acc, orders, prices, "t")
+    assert "OLD" not in acc.positions and set(acc.positions) == {"A", "B"}
+    assert 0 <= acc.cash < 5.0                                     # nunca gasta más de lo que hay
+
+
+def test_allocation_cycle_invests_once_a_month_and_respects_the_band():
+    store = make_store(strategy="allocation", allocation="A 60, B 40", fee_pct=0)
+    jan = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    first = run_cycle(FakeProvider({"A": 10.0, "B": 20.0}), store, now=jan)
+    assert first["rebalanced"] and {b["symbol"] for b in first["buys"]} == {"A", "B"} and first["evaluated"] == 2
+    again = run_cycle(FakeProvider({"A": 20.0, "B": 20.0}), store, now=jan.replace(day=20))
+    assert again["buys"] == [] and again["sells"] == []            # el mismo mes no se revisa dos veces
+    feb = run_cycle(FakeProvider({"A": 10.5, "B": 20.0}), store, now=datetime(2026, 2, 2, 15, 0, tzinfo=UTC))
+    assert not feb["rebalanced"] and "dentro de la banda" in feb["notes"][0]
+    mar = run_cycle(FakeProvider({"A": 20.0, "B": 20.0}), store, now=datetime(2026, 3, 2, 15, 0, tzinfo=UTC))
+    assert mar["rebalanced"] and [x["symbol"] for x in mar["sells"]] == ["A"] and [x["symbol"] for x in mar["buys"]] == ["B"]
+    acc = store.load_account(0)
+    assert acc.positions["A"].value / acc.equity == pytest.approx(0.6)
+    # Un ETF sin precio: se espera, no se opera a ciegas.
+    apr = run_cycle(FakeProvider({"A": 40.0}), store, now=datetime(2026, 4, 1, 15, 0, tzinfo=UTC))
+    assert apr["buys"] == [] and apr["sells"] == [] and "reintentará" in apr["notes"][0]
+
+
+def test_monthly_contribution_adds_cash_without_counting_as_profit():
+    store = make_store(strategy="allocation", allocation="A 60, B 40", fee_pct=0, monthly_contribution=100)
+    prices = FakeProvider({"A": 10.0, "B": 20.0})
+    jan = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    run_cycle(prices, store, now=jan)
+    assert store.get_contributed() == 0.0                           # el mes de arranque no aporta
+    run_cycle(prices, store, now=jan.replace(day=25))
+    assert store.get_contributed() == 0.0
+    feb = run_cycle(prices, store, now=datetime(2026, 2, 2, 15, 0, tzinfo=UTC))
+    assert store.get_contributed() == 100.0 and any("Aportación" in n for n in feb["notes"])
+    acc = store.load_account(0)
+    assert acc.equity == pytest.approx(1100.0) and acc.cash == pytest.approx(0.0, abs=1e-6)   # y se invierte
+    assert acc.equity / store.get_units() == pytest.approx(1.0)     # precios planos: rentabilidad 0 %
+    run_cycle(prices, store, now=datetime(2026, 2, 20, 15, 0, tzinfo=UTC))
+    assert store.get_contributed() == 100.0                         # una sola vez por mes
+    doubled = FakeProvider({"A": 20.0, "B": 40.0})
+    run_cycle(doubled, store, now=datetime(2026, 3, 2, 15, 0, tzinfo=UTC))
+    assert store.get_contributed() == 200.0
+    acc = store.load_account(0)
+    assert acc.equity == pytest.approx(2300.0)                      # 1.100 x 2 + 100 nuevos
+    assert acc.equity / store.get_units() == pytest.approx(2.0)     # la rentabilidad es +100 %, no +130 %
+    assert store.equity_history()[-1]["invested"] == 1200.0
+    store.reset()
+    assert store.get_contributed() == 0.0 and store.get_units() == 1000.0
+
+
+# --- bolsas y horarios ------------------------------------------------------------
+def test_exchange_hours_by_ticker_suffix():
+    assert exchange_of("SPY").name == "Nueva York" and exchange_of("BRK.B").name == "Nueva York"
+    assert exchange_of("VWCE.DE").name == "Xetra" and exchange_of("CSPX.L").name == "Londres"
+    noon_utc = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)               # lunes: Europa abierta, EE. UU. aún no
+    assert closed_exchanges(["VWCE.DE", "EUNA.DE"], noon_utc) == []
+    assert closed_exchanges(["SPY"], noon_utc) == ["Nueva York"]
+    assert closed_exchanges(["SPY", "VWCE.DE"], noon_utc) == ["Nueva York"]
+    assert closed_exchanges(["SPY", "VWCE.DE"], noon_utc.replace(hour=15)) == []   # las dos coinciden abiertas
+    assert closed_exchanges(["SPY", "VWCE.DE"], noon_utc.replace(hour=18)) == ["Xetra"]
+    assert closed_exchanges(["VWCE.DE"], datetime(2026, 1, 3, 12, 0, tzinfo=UTC)) == ["Xetra"]   # sábado
+
+    df = frame([10.0] * 9 + [11.0], end="2026-01-05")
+    xetra = exchange_of("VWCE.DE")
+    bars, price = split_live_bars(df, noon_utc, xetra)                # en sesión en Xetra: vela a medias
+    assert len(bars) == 9 and price == 11.0
+    bars, _ = split_live_bars(df, noon_utc.replace(hour=17), xetra)   # 18:00 en Berlín: ya cerró
+    assert len(bars) == 10
+
+
+def test_european_etfs_trade_in_european_hours():
+    class Live(FakeProvider):
+        real_time = True
+    store = make_store(strategy="allocation", allocation="X.DE 60, Y.DE 40", fee_pct=0)
+    prices = Live({"X.DE": 10.0, "Y.DE": 20.0})
+    evening = run_cycle(prices, store, now=datetime(2026, 1, 5, 19, 0, tzinfo=UTC))   # 20:00 en Berlín
+    assert evening["can_trade"] is False and evening["buys"] == [] and "Xetra" in evening["notes"][0]
+    morning = run_cycle(prices, store, now=datetime(2026, 1, 6, 9, 0, tzinfo=UTC))     # Nueva York aún cerrada
+    assert morning["can_trade"] is True and len(morning["buys"]) == 2
 
 
 # --- ciclo: lista de condiciones ---------------------------------------------
@@ -339,16 +481,25 @@ def test_settings_validation():
     assert s["market_filter"] is True and s["trend_filter"] is False and s["benchmark"] == "QQQ"
     for bad in ({"universe": "<script>"}, {"universe": ""}, {"buy_threshold_pct": 120},
                 {"position_size": "abc"}, {"stop_loss_pct": float("nan")}, {"strategy": "magia"},
-                {"sizing_mode": "todo"}, {"market_filter": "quizá"}, {"benchmark": "a b"}):
+                {"sizing_mode": "todo"}, {"market_filter": "quizá"}, {"benchmark": "a b"},
+                {"allocation": "VT 60, BND 30"}, {"allocation": "VT 50 VT 50"}, {"allocation": "VT"},
+                {"allocation": "<x> 100"}, {"allocation": "VT -10 BND 110"}, {"currency": "GBP"},
+                {"rebalance_band_pct": 0}, {"monthly_contribution": -5}):
         with pytest.raises(SettingsError):
             validate_settings(bad)
     assert validate_settings({}) == DEFAULT_SETTINGS
+    assert parse_allocation("vwce.de: 60%\nvagf.de = 40") == {"VWCE.DE": 60.0, "VAGF.DE": 40.0}
+    assert parse_allocation({"SPY": 100}) == {"SPY": 100.0}
+    assert DEFAULT_SETTINGS["strategy"] == "allocation" and sum(DEFAULT_SETTINGS["allocation"].values()) == 100
+    for preset in PRESETS:                                          # los ejemplos del panel son válidos
+        assert validate_settings(preset["settings"])["allocation"] == preset["settings"]["allocation"]
 
 
 # --- backtest ----------------------------------------------------------------
-@pytest.mark.parametrize("strategy", ["rotation", "checklist"])
+@pytest.mark.parametrize("strategy", ["allocation", "rotation", "checklist"])
 def test_backtest_is_consistent_and_deterministic(strategy):
-    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM", "strategy": strategy})
+    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM", "strategy": strategy,
+                                  "allocation": "SPY 60, KO 40"})
     a = run_backtest(SyntheticProvider(), settings, years=2)
     b = run_backtest(SyntheticProvider(), settings, years=2)
     assert a["bot"] == b["bot"] and a["strategy"] == strategy
@@ -363,9 +514,37 @@ def test_backtest_is_consistent_and_deterministic(strategy):
     json.dumps(a, allow_nan=False)  # debe ser JSON válido (sin NaN)
 
 
+def test_allocation_backtest_holds_weights_and_handles_contributions():
+    provider = SyntheticProvider()
+    base = {"strategy": "allocation", "allocation": "SPY 60, KO 40", "fee_pct": 0}
+    plain = run_backtest(provider, validate_settings(base), years=3)
+    assert plain["avg_exposure_pct"] > 99 and plain["open_positions"] == 2 and plain["contributed"] == 0
+    assert plain["final_value"] == pytest.approx(plain["bot"]["final"])
+    buys = [t for t in plain["last_trades"] if t["side"] == "BUY"]
+    assert all("Reequilibrio" in t["reason"] or "Inversión inicial" in t["reason"] for t in buys)
+
+    saver = run_backtest(provider, validate_settings({**base, "monthly_contribution": 50}), years=3)
+    assert saver["contributed"] == pytest.approx(50 * 36, abs=50) and saver["invested_total"] == 1000 + saver["contributed"]
+    assert saver["final_value"] > plain["final_value"]                # hay más dinero dentro...
+    # ...pero la rentabilidad casi no cambia: lo aportado no cuenta como ganancia.
+    assert saver["bot"]["cagr_pct"] == pytest.approx(plain["bot"]["cagr_pct"], abs=1.5)
+    json.dumps(saver, allow_nan=False)
+
+
+def test_allocation_backtest_waits_for_the_youngest_etf():
+    class Young(SyntheticProvider):
+        def history(self, symbol, days):
+            df = super().history(symbol, days)
+            return df[df.index >= "2025-01-01"] if symbol == "NEW" else df
+
+    settings = validate_settings({"strategy": "allocation", "allocation": "SPY 50, NEW 50"})
+    res = run_backtest(Young(), settings, years=5)
+    assert res["start"] >= "2025-01-01"                                # no finge historia que no existe
+
+
 def test_backtest_executes_at_next_open_not_same_close():
     """Una orden decidida con el cierre de D se ejecuta a la apertura de D+1."""
-    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM"})
+    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM", "strategy": "rotation"})
     provider = SyntheticProvider()
     res = run_backtest(provider, settings, years=2)
     buys = [t for t in res["last_trades"] if t["side"] == "BUY"]
@@ -376,7 +555,7 @@ def test_backtest_executes_at_next_open_not_same_close():
 
 
 def test_backtest_end_date_cuts_the_future():
-    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM"})
+    settings = validate_settings({"universe": "SPY QQQ AAPL MSFT KO XOM", "strategy": "rotation"})
     res = run_backtest(SyntheticProvider(), settings, years=2, end="2022-06-30")
     assert res["end"] == "2022-06-30" and res["start"].startswith("2020-0")
 
@@ -447,23 +626,41 @@ def test_api_flow():
     assert client.get("/").status_code == 200
     state = client.get("/api/state").get_json()
     assert state["account"]["equity"] == 1000.0 and state["positions"] == [] and state["provider"] == "synthetic"
-    assert state["rebalance_pending"] is True and state["settings"]["strategy"] == "rotation"
+    assert state["rebalance_pending"] is True and state["settings"]["strategy"] == "allocation"
+    assert [w["symbol"] for w in state["weights"]] == ["VT", "BND"] and len(state["presets"]) == 3
 
-    saved = client.post("/api/settings", json={"universe": "SPY QQQ KO XOM", "monthly_cost": 5, "trend_filter": False})
+    # Modo cartera: invierte según los pesos y los muestra.
+    cycle = client.post("/api/cycle").get_json()
+    assert cycle["strategy"] == "allocation" and {b["symbol"] for b in cycle["buys"]} == {"VT", "BND"}
+    state = client.get("/api/state").get_json()
+    vt = next(w for w in state["weights"] if w["symbol"] == "VT")
+    assert vt["target_pct"] == 60.0 and vt["actual_pct"] == pytest.approx(60.0, abs=0.2)
+    assert state["rebalance_pending"] is False and state["account"]["pnl_pct"] == pytest.approx(-0.1, abs=0.05)
+
+    # Cambiar la cartera obliga a revisarla en el siguiente análisis, sin esperar al mes que viene.
+    saved = client.post("/api/settings", json={"allocation": "SPY 50, KO 50", "currency": "EUR"})
+    assert saved.status_code == 200 and saved.get_json()["allocation"] == {"SPY": 50.0, "KO": 50.0}
+    assert client.get("/api/state").get_json()["rebalance_pending"] is True
+    cycle = client.post("/api/cycle").get_json()
+    assert {x["symbol"] for x in cycle["sells"]} == {"VT", "BND"} and {b["symbol"] for b in cycle["buys"]} == {"SPY", "KO"}
+    assert client.post("/api/settings", json={"allocation": "SPY 50"}).status_code == 400
+
+    # Rotación sobre una lista propia.
+    saved = client.post("/api/settings", json={"strategy": "rotation", "universe": "SPY QQQ KO XOM",
+                                               "monthly_cost": 5, "trend_filter": False})
     assert saved.status_code == 200 and saved.get_json()["trend_filter"] is False
     bad = client.post("/api/settings", json={"buy_threshold_pct": 10})
     assert bad.status_code == 400 and "Umbral de compra" in bad.get_json()["error"]
-
     cycle = client.post("/api/cycle").get_json()
     assert cycle["evaluated"] == 4 and cycle["strategy"] == "rotation"
     state = client.get("/api/state").get_json()
-    assert len(state["signals"]) == 4 and len(state["equity"]) == 1
+    assert len(state["signals"]) == 4 and len(state["equity"]) == 3 and state["weights"] == []
     assert all(len(g["results"]) == 10 and "mom" in g for g in state["signals"])
     assert state["account"]["net_pnl"] <= state["account"]["pnl"]
 
-    assert client.get("/api/backtest?years=1").get_json()["strategy"] == "rotation"
-    assert client.get("/api/backtest?years=1&strategy=checklist").get_json()["strategy"] == "checklist"
-    assert client.get("/api/state").get_json()["settings"]["strategy"] == "rotation"  # no se guarda
+    for strategy in ("allocation", "rotation", "checklist"):
+        assert client.get(f"/api/backtest?years=1&strategy={strategy}").get_json()["strategy"] == strategy
+    assert client.get("/api/state").get_json()["settings"]["strategy"] == "rotation"  # probar otra no la guarda
     assert client.get("/api/backtest?years=99").status_code == 400
     assert client.get("/api/backtest?years=1&strategy=x").status_code == 400
 

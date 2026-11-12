@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, jsonify, request
 
 from bot.backtest import run_backtest
-from bot.config import SettingsError, validate_settings
+from bot.config import PRESETS, SettingsError, validate_settings
 from bot.data import make_provider
 from bot.engine import run_cycle
 from bot.notify import notify_cycle, telegram_configured
@@ -64,31 +64,49 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
         s = store.get_settings()
         account = store.load_account(s["fee_pct"])
         initial = store.get_initial_cash()
+        contributed = store.get_contributed()
+        invested = initial + contributed
         equity = account.equity
         positions = sorted((p.to_dict() for p in account.positions.values()), key=lambda p: -p["value"])
         created = datetime.fromisoformat(store.get_meta("created_at"))
         months = max(0.0, (datetime.now(timezone.utc) - created).days / 30.44)
         costs = months * s["monthly_cost"]
         month_key = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m")
+
+        # Cartera fija: peso objetivo frente a peso real de cada ETF.
+        weights = []
+        if s["strategy"] == "allocation":
+            held = {p["symbol"]: p["value"] for p in positions}
+            for sym in dict.fromkeys(list(s["allocation"]) + list(held)):
+                target, value = s["allocation"].get(sym, 0.0), held.get(sym, 0.0)
+                actual = 100.0 * value / equity if equity > 0 else 0.0
+                weights.append({"symbol": sym, "target_pct": target, "actual_pct": actual,
+                                "drift_pct": actual - target, "value": value})
+
         return jsonify({
             "provider": provider.name,
             "auto_cycle_minutes": auto_cycle_minutes,
             "telegram": telegram_configured(),
             "settings": s,
+            "presets": PRESETS,
             "account": {
                 "initial_cash": initial,
+                "contributed": contributed,
+                "invested": invested,
                 "cash": account.cash,
-                "invested": equity - account.cash,
+                "in_positions": equity - account.cash,
                 "equity": equity,
-                "pnl": equity - initial,
-                "pnl_pct": 100.0 * (equity - initial) / initial,
+                "pnl": equity - invested,
+                # Rentabilidad por participación: no cuenta como ganancia el dinero aportado.
+                "pnl_pct": 100.0 * (equity / store.get_units() - 1),
                 "realized_pnl": store.realized_pnl(),
                 "unrealized_pnl": sum(p["pnl"] for p in positions),
                 "created_at": created.isoformat(timespec="seconds"),
                 "costs_to_date": costs,
-                "net_pnl": equity - initial - costs,
+                "net_pnl": equity - invested - costs,
             },
-            "rebalance_pending": s["strategy"] == "rotation" and store.get_meta("last_rebalance") != month_key,
+            "rebalance_pending": s["strategy"] != "checklist" and store.get_meta("last_rebalance") != month_key,
+            "weights": weights,
             "positions": positions,
             "trades": store.trades(200),
             "equity": store.equity_history(),
@@ -105,11 +123,16 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
 
     @app.post("/api/settings")
     def save_settings():
+        old = store.get_settings()
         try:
-            new = validate_settings(request.get_json(force=True) or {}, store.get_settings())
+            new = validate_settings(request.get_json(force=True) or {}, old)
         except SettingsError as exc:
             return jsonify({"error": str(exc)}), 400
         store.save_settings(new)
+        # Si cambia qué se compra, la revisión mensual se repite en el próximo análisis
+        # en vez de esperar al mes siguiente.
+        if any(old[k] != new[k] for k in ("strategy", "allocation", "universe", "max_positions")):
+            store.clear_meta("last_rebalance")
         return jsonify(new)
 
     @app.post("/api/reset")
@@ -125,8 +148,8 @@ def create_app(provider=None, db_path: str | None = None, auto_cycle_minutes: fl
             years = float(request.args.get("years", 5))
         except ValueError:
             return jsonify({"error": "years debe ser un número"}), 400
-        if not 0.5 <= years <= 15:
-            return jsonify({"error": "years debe estar entre 0.5 y 15"}), 400
+        if not 0.5 <= years <= 25:
+            return jsonify({"error": "years debe estar entre 0.5 y 25"}), 400
         settings = store.get_settings()
         if "strategy" in request.args:
             try:

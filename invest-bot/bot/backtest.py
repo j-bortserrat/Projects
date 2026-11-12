@@ -14,8 +14,8 @@ import math
 
 import pandas as pd
 
-from .engine import (build_signal, buy_reason, check_exit, market_is_bullish, plan_rotation,
-                     position_amount, rank_candidates)
+from .engine import (build_signal, buy_reason, check_exit, execute_allocation, market_is_bullish,
+                     plan_allocation, plan_rotation, position_amount, rank_candidates, tracked_symbols)
 from .indicators import compute_indicators
 from .portfolio import Account
 
@@ -72,6 +72,8 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
     days = int(years * 365) + WARMUP_DAYS
     if end is not None:
         days += max(0, (pd.Timestamp.today().normalize() - end).days)
+    if s["strategy"] == "allocation":
+        s = {**s, "market_filter": False}   # el filtro de mercado no aplica a una cartera fija
 
     def load(sym: str) -> pd.DataFrame:
         ind = compute_indicators(provider.history(sym, days))
@@ -80,7 +82,7 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
     rows: dict[str, dict] = {}       # symbol -> {fecha -> indicadores}
     closes: dict[str, pd.Series] = {}
     errors: dict[str, str] = {}
-    for sym in s["universe"]:
+    for sym in tracked_symbols(s):
         try:
             ind = load(sym)
             if ind.empty:
@@ -90,7 +92,10 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
         except Exception as exc:
             errors[sym] = str(exc)
     if not rows:
-        raise RuntimeError("No hay datos para ningún ticker del universo")
+        raise RuntimeError("No hay datos para ningún ticker")
+    allocation = s["strategy"] == "allocation"
+    if allocation and errors:
+        raise RuntimeError("Faltan datos de la cartera: " + ", ".join(errors))
 
     bench_sym = s["benchmark"]
     bench_rows: dict = {}
@@ -103,7 +108,11 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
 
     all_dates = sorted(set().union(*(r.keys() for r in rows.values())))
     start = all_dates[-1] - pd.Timedelta(days=int(years * 365))
+    if allocation:   # una cartera fija solo puede empezar cuando existen todos sus ETFs
+        start = max(start, max(series.index[0] for series in closes.values()))
     dates = [d for d in all_dates if d >= start]
+    if len(dates) < 2:
+        raise RuntimeError("No hay suficiente historia para simular ese periodo")
 
     account = Account(cash=s["initial_cash"], fee_pct=s["fee_pct"])
     pending_sells: dict[str, tuple[str, float | None]] = {}  # symbol -> (motivo, score)
@@ -111,11 +120,21 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
     curve: list[dict] = []
     exposure: list[float] = []
     blocked_days = 0
+    weights = {sym: pct / 100.0 for sym, pct in s["allocation"].items()}
+    pending_alloc: bool | None = None   # None: nada pendiente · True: invertir sí o sí · False: revisión mensual
+    contribution, contributed = s["monthly_contribution"], 0.0
+    units = s["initial_cash"]           # valor / participaciones = rentabilidad sin contar lo aportado
 
     rotation = s["strategy"] == "rotation"
     for i, d in enumerate(dates):
         ts = d.strftime("%Y-%m-%d")
         today = {sym: r[d] for sym, r in rows.items() if d in r}
+
+        # 0) Aportación mensual: dinero nuevo el primer día de bolsa de cada mes.
+        if contribution > 0 and i > 0 and dates[i - 1].month != d.month:
+            units += contribution / (account.equity / units)
+            account.cash += contribution
+            contributed += contribution
 
         # 1) Ejecutar a la apertura las órdenes decididas ayer.
         for sym in list(pending_sells):
@@ -132,6 +151,13 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
                     break
                 account.buy(sym, today[sym]["open"], amount, ts, sig["score_pct"], buy_reason(sig, s))
         pending_buys = []
+        if allocation and pending_alloc is not None:
+            needed = set(weights) | set(account.positions)
+            opens = {sym: today[sym]["open"] for sym in needed if sym in today and not math.isnan(today[sym]["open"])}
+            if len(opens) == len(needed):
+                orders = plan_allocation(account, opens, weights, s, force=pending_alloc)
+                execute_allocation(account, orders, opens, ts)
+                pending_alloc = None
 
         # 2) Al cierre: valorar, y decidir las órdenes de mañana.
         signals = [build_signal(sym, row, ts) for sym, row in today.items()]
@@ -141,16 +167,22 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
             if sig is None or sym in pending_sells:
                 continue
             pos.mark(sig["price"])
-            reason = check_exit(pos, sig["price"], None if rotation else sig["score_pct"], s)
+            reason = None if allocation else check_exit(pos, sig["price"], None if rotation else sig["score_pct"], s)
             if reason:
                 pending_sells[sym] = (reason, sig["score_pct"])
 
-        market_ok = market_is_bullish(bench_rows.get(d)) if s["market_filter"] else True
+        market_ok = market_is_bullish(bench_rows.get(d)) if s["market_filter"] and not allocation else True
         if not market_ok:
             blocked_days += 1
-        if rotation:
+        month_end = i + 1 < len(dates) and dates[i + 1].month != d.month
+        if allocation:
+            # Revisión con el último cierre de cada mes; la primera inversión, cuanto antes.
+            if not account.positions:
+                pending_alloc = True
+            elif month_end and pending_alloc is None:
+                pending_alloc = False
+        elif rotation:
             # Se rota con el último cierre de cada mes (y el primer día, para no empezar en efectivo).
-            month_end = i + 1 < len(dates) and dates[i + 1].month != d.month
             if i == 0 or month_end:
                 rot_sells, candidates = plan_rotation(signals, set(account.positions), s)
                 for sym, reason in rot_sells.items():
@@ -161,7 +193,9 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
             pending_buys = rank_candidates(signals, set(account.positions), s)
 
         equity = account.equity
-        curve.append({"ts": ts, "equity": equity})
+        # Con aportaciones, la curva sigue el valor de la participación: así es comparable
+        # con el índice y no confunde dinero aportado con ganancia.
+        curve.append({"ts": ts, "equity": equity / units * s["initial_cash"]})
         exposure.append(1 - account.cash / equity if equity > 0 else 0.0)
 
     initial = s["initial_cash"]
@@ -205,6 +239,9 @@ def run_backtest(provider, settings: dict, years: float = 3.0, end=None) -> dict
         "start": dates[0].strftime("%Y-%m-%d"),
         "end": dates[-1].strftime("%Y-%m-%d"),
         "initial_cash": initial,
+        "contributed": contributed,
+        "invested_total": initial + contributed,
+        "final_value": account.equity,
         "benchmark": bench_sym,
         "bot": stats(equity_values),
         "market": stats(market_values),

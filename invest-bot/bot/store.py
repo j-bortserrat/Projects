@@ -37,6 +37,9 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock, self._db:
             self._db.executescript(_SCHEMA)
+            columns = {r["name"] for r in self._db.execute("PRAGMA table_info(equity)")}
+            if "invested" not in columns:   # bases de datos de versiones anteriores
+                self._db.execute("ALTER TABLE equity ADD COLUMN invested REAL")
         if self._get("cash") is None:
             self.reset()
         elif self._get("created_at") is None:  # bases de datos de versiones anteriores
@@ -67,6 +70,19 @@ class Store:
         with self._lock:
             return self._get(key)
 
+    def clear_meta(self, key: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM meta WHERE key=?", (key,))
+
+    def get_contributed(self) -> float:
+        """Dinero añadido con aportaciones mensuales desde el último reinicio."""
+        return float(self.get_meta("contributed") or 0.0)
+
+    def get_units(self) -> float:
+        """Participaciones de la cartera. Valor / participaciones mide la rentabilidad sin
+        contar como ganancia el dinero aportado."""
+        return float(self.get_meta("units") or self.get_initial_cash())
+
     def get_last_cycle(self):
         with self._lock:
             return self._get("last_cycle")
@@ -85,7 +101,8 @@ class Store:
             initial = float(validate_settings(saved, DEFAULT_SETTINGS)["initial_cash"])
             self._set("cash", initial)
             self._set("initial_cash", initial)
-            self._db.execute("DELETE FROM meta WHERE key IN ('last_cycle', 'last_rebalance')")
+            self._db.execute("DELETE FROM meta WHERE key IN ('last_cycle', 'last_rebalance', "
+                             "'last_contribution', 'units', 'contributed')")
             self._set("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     def load_account(self, fee_pct: float) -> Account:
@@ -122,7 +139,9 @@ class Store:
                 [(s["symbol"], s["ts"], s["price"], s["score_pct"], s["passed"], s["total"],
                   s["status"], json.dumps({k: s.get(k) for k in _SIGNAL_EXTRA})) for s in signals],
             )
-            self._db.execute("INSERT INTO equity VALUES(?,?,?)", (summary["ts"], account.equity, account.cash))
+            invested = float(self._get("initial_cash")) + float(self._get("contributed") or 0.0)
+            self._db.execute("INSERT INTO equity(ts,equity,cash,invested) VALUES(?,?,?,?)",
+                             (summary["ts"], account.equity, account.cash, invested))
             self._set("last_cycle", summary)
 
     # --- lecturas para el panel -----------------------------------------------
@@ -147,10 +166,10 @@ class Store:
     def equity_history(self, limit: int = 1000) -> list[dict]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM (SELECT rowid AS rid, ts, equity, cash FROM equity ORDER BY rowid DESC LIMIT ?) "
+                "SELECT * FROM (SELECT rowid AS rid, ts, equity, cash, invested FROM equity ORDER BY rowid DESC LIMIT ?) "
                 "ORDER BY rid", (limit,)
             ).fetchall()
-        return [{"ts": r["ts"], "equity": r["equity"], "cash": r["cash"]} for r in rows]
+        return [{"ts": r["ts"], "equity": r["equity"], "cash": r["cash"], "invested": r["invested"]} for r in rows]
 
     def signals(self) -> list[dict]:
         with self._lock:

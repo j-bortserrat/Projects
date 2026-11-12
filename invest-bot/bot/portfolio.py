@@ -48,14 +48,22 @@ class Account:
     def equity(self) -> float:
         return self.cash + sum(p.value for p in self.positions.values())
 
-    def buy(self, symbol: str, price: float, amount: float, ts: str, score: float, reason: str) -> dict | None:
-        """Invierte `amount` (comisión incluida). Devuelve la operación o None si no se puede."""
-        if symbol in self.positions or price <= 0 or amount <= 0 or self.cash + 1e-9 < amount:
+    def buy(self, symbol: str, price: float, amount: float, ts: str, score: float, reason: str,
+            add: bool = False) -> dict | None:
+        """Invierte `amount` (comisión incluida). Devuelve la operación o None si no se puede.
+        Con `add=True` amplía una posición existente; si no, cada ticker se compra una sola vez."""
+        pos = self.positions.get(symbol)
+        if (pos is not None and not add) or price <= 0 or amount <= 0 or self.cash + 1e-9 < amount:
             return None
         fee = amount * self.fee_pct / 100.0
         qty = (amount - fee) / price
         self.cash -= amount
-        self.positions[symbol] = Position(symbol, qty, amount, ts, score, price, price)
+        if pos is None:
+            self.positions[symbol] = Position(symbol, qty, amount, ts, score, price, price)
+        else:
+            pos.qty += qty
+            pos.cost += amount
+            pos.mark(price)
         trade = {
             "ts": ts, "symbol": symbol, "side": "BUY", "qty": qty, "price": price, "fee": fee,
             "amount": amount, "pnl": None, "pnl_pct": None, "reason": reason, "score": score,
@@ -63,17 +71,29 @@ class Account:
         self.trades.append(trade)
         return trade
 
-    def sell(self, symbol: str, price: float, ts: str, score: float | None, reason: str) -> dict | None:
-        pos = self.positions.pop(symbol, None)
-        if pos is None:
+    def sell(self, symbol: str, price: float, ts: str, score: float | None, reason: str,
+             qty: float | None = None) -> dict | None:
+        """Vende la posición entera o, si se indica `qty`, solo esa cantidad."""
+        pos = self.positions.get(symbol)
+        if pos is None or price <= 0:
             return None
-        gross = pos.qty * price
+        if qty is None or qty >= pos.qty * (1 - 1e-9):
+            qty, cost = pos.qty, pos.cost
+            del self.positions[symbol]
+        elif qty <= 0:
+            return None
+        else:
+            cost = pos.cost * qty / pos.qty   # el coste se reparte en proporción a lo vendido
+            pos.qty -= qty
+            pos.cost -= cost
+            pos.mark(price)
+        gross = qty * price
         fee = gross * self.fee_pct / 100.0
         net = gross - fee
         self.cash += net
         trade = {
-            "ts": ts, "symbol": symbol, "side": "SELL", "qty": pos.qty, "price": price, "fee": fee,
-            "amount": net, "pnl": net - pos.cost, "pnl_pct": 100.0 * (net - pos.cost) / pos.cost,
+            "ts": ts, "symbol": symbol, "side": "SELL", "qty": qty, "price": price, "fee": fee,
+            "amount": net, "pnl": net - cost, "pnl_pct": 100.0 * (net - cost) / cost,
             "reason": reason, "score": score,
         }
         self.trades.append(trade)
