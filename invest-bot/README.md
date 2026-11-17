@@ -1,88 +1,115 @@
-# Bot de inversión (simulación)
+# Bot de inversión en ETFs (simulación)
 
-Bot que vigila una lista de acciones y ETFs y gestiona una **cartera ficticia** siguiendo
-reglas fijas. No se conecta a ningún bróker ni mueve dinero real. Incluye un panel web en
-español con la cartera, el ranking de señales, el historial de operaciones, un backtest
-comparativo y los ajustes.
+Bot que gestiona una **cartera ficticia de ETFs** siguiendo reglas fijas y la muestra en un
+panel web en español. No se conecta a ningún bróker ni mueve dinero real.
 
 > Herramienta educativa. No es asesoramiento financiero. Un buen resultado simulado o
 > histórico no garantiza resultados reales, y cualquier estrategia puede perder dinero.
 
 ## Qué hace
 
-Tiene dos estrategias; se elige en **Ajustes**.
+Tiene tres estrategias; se elige en **Ajustes**.
 
-### Rotación mensual (por defecto)
+### Cartera fija (por defecto)
 
-1. La primera sesión de cada mes ordena los tickers por **momentum**: la media de su
-   rentabilidad a 3, 6 y 12 meses.
-2. Se queda con los **5 más fuertes** que además cumplan al menos el **60 % de las 10
-   condiciones** y coticen sobre su media de 200 días. Si hay menos de 5, el resto queda
-   en efectivo.
-3. Vende los que han salido de ese grupo y compra los nuevos, un 20 % de la cartera cada
-   uno (las ganancias se reinvierten).
-4. Entre rotaciones solo actúa el stop-loss (−25 % por posición).
+Trata los ETFs como una cartera de fondos: tú eliges los pesos y el bot los mantiene.
 
-### Lista de condiciones (la versión original)
+1. Invierte el capital según los pesos objetivo. Por defecto, 60 % en acciones de todo el
+   mundo (`VT`) y 40 % en bonos (`BND`).
+2. Una vez al mes comprueba los pesos. Si alguno se ha desviado más de 5 puntos, vende lo
+   que sobra y compra lo que falta. Si no, no toca nada.
+3. Si configuras una **aportación mensual**, ese dinero va siempre a lo que está por debajo
+   de su peso, sin vender nada.
 
-Compra un ticker cuando cumple al menos el **90 %** de las condiciones y lo vende si baja
-del 30 %, o por stop-loss.
+No usa stops ni señales: su ventaja es operar muy poco.
 
-### Las 10 condiciones (`bot/rules.py`)
+### Rotación mensual
 
-1. Precio por encima de la media de 200 días
-2. Media de 50 días por encima de la de 200
-3. Precio por encima de la media de 50 días
-4. RSI entre 45 y 68
-5. MACD por encima de su señal
-6. Impulso acelerando (histograma MACD mayor que hace 3 días)
-7. Volumen sostenido (media de 20 días ≥ 90 % de la de 60)
-8. A menos de un 10 % del máximo de 52 semanas
-9. Rentabilidad positiva en 3 meses
-10. Volatilidad anualizada por debajo del 50 %
+Cada mes ordena una lista de ETFs por momentum (media de la rentabilidad a 3, 6 y 12
+meses) y se queda con los 5 más fuertes que cumplan al menos el 60 % de las 10 condiciones
+y coticen sobre su media de 200 días. Entre rotaciones solo actúa un stop-loss del 25 %.
+
+### Lista de condiciones
+
+Compra un ETF cuando cumple al menos el 90 % de las 10 condiciones técnicas de
+`bot/rules.py` y lo vende si baja del 30 %, o por stop-loss.
 
 ## Qué resultados cabe esperar
 
-Backtest con datos reales de Yahoo Finance, noviembre de 2016 a noviembre de 2026, con
-los ajustes por defecto y un 0,1 % de comisión por operación:
+Backtest con datos reales de Yahoo Finance, de enero de 2008 a noviembre de 2026 (incluye
+las caídas de 2008, 2020 y 2022), con un 0,1 % de comisión por operación:
 
-| Lista de tickers | Estrategia | Rentabilidad anual | Peor caída |
-|---|---|---|---|
-| Solo ETFs (20) | Rotación mensual | +11,0 % | −19,5 % |
-| Solo ETFs (20) | Lista de condiciones | +6,0 % | −28,8 % |
-| La lista por defecto (25, con acciones) | Rotación mensual | +30,4 % | −21,7 % |
-| La lista por defecto (25, con acciones) | Lista de condiciones | +13,6 % | −25,9 % |
-| — | Comprar SPY y no tocarlo | +15,0 % | −33,7 % |
+| Estrategia | Rentabilidad anual | Peor caída | Años en negativo | Ventas |
+|---|---|---|---|---|
+| Cartera fija 60/40, S&P 500 y bonos del Tesoro (`SPY`, `IEF`) | +8,2 % | −30,6 % | 3 de 19 | 11 |
+| Cartera fija 60/40 global (`VT`, `BND`), desde junio de 2008 | +6,5 % | −33,5 % | 5 de 19 | 10 |
+| Rotación mensual, 23 ETFs | +7,2 % | −25,2 % | 5 de 19 | 332 |
+| Lista de condiciones, 23 ETFs | +2,2 % | −23,7 % | 7 de 19 | 66 |
+| Comprar `SPY` y no tocarlo | +11,2 % | −51,9 % | — | 0 |
+
+Con ETFs europeos (UCITS, en euros), donde solo hay historia conjunta desde noviembre de
+2017:
+
+| Estrategia | Rentabilidad anual | Peor caída |
+|---|---|---|
+| Cartera fija 60/40 global (`IUSQ.DE`, `EUNA.DE`) | +7,0 % | −22,9 % |
+| Rotación mensual, 14 ETFs UCITS | +8,4 % | −15,8 % |
+| Comprar MSCI World (`EUNL.DE`) y no tocarlo | +12,5 % | −33,6 % |
 
 Cómo leerlo:
 
-- **La cifra creíble es la de «solo ETFs».** La lista por defecto incluye acciones (NVDA,
-  TSLA, META…) elegidas sabiendo que subieron mucho; su +30 % está inflado por ese sesgo
-  y no es una expectativa realista. Solo en 2020 sumó un +156 %.
-- **Sin ese sesgo, la rotación no ha batido al índice en rentabilidad** (+11 % frente a
-  +15 % anual). Lo que sí ha hecho es caer bastante menos en los malos momentos.
-- En 2025 y 2026 la rotación ha ido por detrás del índice también con la lista por defecto.
-- Los ajustes por defecto se eligieron comparando variantes sobre estos mismos datos. Se
-  eligió lo más estable, no lo que más ganó, pero siguen estando ajustados al pasado.
-- La simulación es optimista: sin deslizamiento, con acciones fraccionadas y sin impuestos.
+- **Ninguna estrategia ha batido en rentabilidad a comprar el índice de acciones y
+  esperar.** Lo que ofrecen las carteras mixtas es caer bastante menos por el camino.
+- **La cartera fija se eligió por defecto por ser la más simple y estable**, no por ser la
+  que más gana: rindió parecido a la rotación con treinta veces menos operaciones.
+- La 60/40 de EE. UU. sale mejor que la global porque en este periodo la bolsa
+  estadounidense fue la que más subió. Eso se sabe ahora; no había forma de saberlo en 2008.
+- La lista de condiciones es la peor de las tres con ETFs.
+- La simulación es optimista: sin deslizamiento, con participaciones fraccionadas y sin
+  impuestos. Las ventas de la rotación tributarían cada año; la cartera fija casi no vende.
 
-Puedes repetir estas pruebas en la pestaña **Backtest**, que compara tu estrategia, la
-otra y comprar el índice, año a año.
+Ejemplo con aportaciones: 1.000 $ iniciales más 100 $ al mes en la 60/40 de `SPY` e `IEF`
+desde 2008 son 23.600 $ aportados, que en noviembre de 2026 valdrían unos 63.700 $.
+
+Todo esto se puede repetir en la pestaña **Backtest**, que compara las tres estrategias
+con el índice, año a año.
 
 ## Cómo arrancarlo
 
 Necesitas Python 3.10 o superior.
 
+**Windows (PowerShell)**
+
+```powershell
+cd invest-bot
+py -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python app.py
+```
+
+**macOS / Linux**
+
 ```bash
 cd invest-bot
-python -m venv .venv
-source .venv/bin/activate        # en Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python app.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python app.py
 ```
 
 Abre <http://127.0.0.1:5000>. El bot usa datos reales de Yahoo Finance (gratis) y analiza
-solo cada 15 minutos mientras el programa esté abierto.
+solo cada 15 minutos mientras el programa esté abierto. Solo lo he ejecutado en Linux.
+
+### ETFs que puedes comprar desde España
+
+Los ETFs estadounidenses (`VT`, `SPY`…) normalmente no se venden a particulares en la UE.
+En **Ajustes → Cargar un ejemplo** hay una cartera equivalente con ETFs UCITS de Xetra, en
+euros. El bot reconoce la bolsa por el sufijo del ticker (`.DE`, `.L`, `.AS`, `.PA`, `.MI`,
+`.MC`…) y solo opera en su horario.
+
+Si mezclas ETFs de EE. UU. y de Europa, el bot solo opera cuando todas las bolsas están
+abiertas a la vez (por la tarde, hora española).
+
+### Variables de entorno
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
@@ -110,25 +137,24 @@ viaja sin cifrar salvo que pongas HTTPS delante (por ejemplo con Caddy o un tún
 1. En Telegram, habla con **@BotFather**, envía `/newbot` y guarda el token que te da.
 2. Escribe cualquier mensaje a tu bot nuevo.
 3. Abre `https://api.telegram.org/bot<TOKEN>/getUpdates` y copia el número de `chat.id`.
-4. Arranca con `TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=... python app.py`.
+4. Arranca con las variables `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` definidas.
 
-Recibirás un mensaje con cada compra y venta. No guardes el token en el repositorio.
+Recibirás un mensaje con cada compra y venta. El envío real no se ha probado, solo con un
+servidor simulado. No guardes el token en el repositorio.
 
 ## Detalles de funcionamiento
 
-- **Precios diarios.** Las condiciones se calculan con velas diarias completas; la vela
-  del día en curso solo aporta el precio actual. Consultar más a menudo hace que el
-  stop-loss reaccione antes, pero no cambia qué se compra.
-- **Solo opera con la bolsa de EE. UU. abierta** (lunes a viernes, 9:30–16:00 de Nueva
-  York; no conoce los festivos). Fuera de horario actualiza las señales y espera.
+- **Precios diarios.** Las señales se calculan con velas diarias completas; la vela del
+  día en curso solo aporta el precio actual.
+- **Horario de bolsa.** Fuera de horario actualiza precios y espera. No conoce los
+  festivos.
 - **El backtest no ve el futuro:** decide con el cierre de un día y ejecuta a la apertura
-  del siguiente.
-- **Gastos:** si indicas tus gastos mensuales en Ajustes, el panel muestra la ganancia
-  neta después de descontarlos.
-- Los importes se muestran en dólares; no se convierte divisa.
-- Si resides en la UE, muchos ETFs estadounidenses (SPY, QQQ…) no se pueden comprar como
-  minorista. Para simular con equivalentes europeos añade en Ajustes tickers UCITS con el
-  sufijo de Yahoo, por ejemplo `VWCE.DE` o `CSPX.L`.
+  del siguiente. Una cartera fija empieza cuando existe el más joven de sus ETFs.
+- **Aportaciones y rentabilidad.** El porcentaje de rentabilidad se calcula por
+  participación, así que el dinero aportado no cuenta como ganancia.
+- **Moneda.** El ajuste de moneda solo cambia el símbolo que se muestra; no convierte
+  divisas. Usa ETFs de una sola moneda en cada cartera.
+- **Gastos.** Si indicas tus gastos mensuales, el panel muestra la ganancia neta.
 
 ## Tests
 
@@ -141,13 +167,14 @@ python -m pytest -q
 ```
 app.py              Servidor web y API
 static/index.html   Panel
-bot/rules.py        Las 10 condiciones
+bot/config.py       Ajustes por defecto, ejemplos y validación
 bot/engine.py       Decisiones de compra y venta (compartidas con el backtest)
 bot/backtest.py     Simulación sobre datos históricos
 bot/portfolio.py    Cartera ficticia
-bot/data.py         Datos de Yahoo Finance (y datos de prueba)
+bot/markets.py      Horarios de cada bolsa
+bot/rules.py        Las 10 condiciones técnicas
 bot/indicators.py   Medias, RSI, MACD, momentum…
+bot/data.py         Datos de Yahoo Finance (y datos de prueba)
 bot/notify.py       Alertas de Telegram
 bot/store.py        Base de datos SQLite
-bot/config.py       Ajustes por defecto y su validación
 ```

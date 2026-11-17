@@ -273,7 +273,11 @@ const money = (n) => {
   return (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", digits);
 };
 const signedMoney = (n) => (n > 0 ? "+" : "") + money(n);
-const pct = (n, digits = 2) => (n > 0 ? "+" : "") + n.toFixed(digits) + " %";
+// En euros, decimales con coma (formato español); en dólares, con punto.
+const fixed = (n, digits) => state && state.settings.currency === "EUR"
+  ? n.toLocaleString("es-ES", {minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false})
+  : n.toFixed(digits);
+const pct = (n, digits = 2) => (n > 0 ? "+" : "") + fixed(n, digits) + " %";
 const cls = (n) => (n > 0 ? "pos" : n < 0 ? "neg" : "");
 const when = (ts) => {
   if (!ts) return "";
@@ -312,7 +316,7 @@ function drawChart(canvas, series, labels) {
   }
   let lo = Math.min(...all), hi = Math.max(...all);
   if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
-  const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
+  const padY = (hi - lo) * 0.08; lo = lo >= 0 ? Math.max(0, lo - padY) : lo - padY; hi += padY;
   const L = 64, R = 10, T = 10, B = 24;
   const x = (i) => L + (w - L - R) * (i / (n - 1));
   const y = (v) => T + (h - T - B) * (1 - (v - lo) / (hi - lo));
@@ -408,7 +412,7 @@ function renderPositions() {
     <th>Ticker</th><th class="r">Cantidad</th><th class="r">Precio compra</th><th class="r">Precio actual</th>
     <th class="r">Valor</th><th class="r">Gan./pérd.</th><th class="r">%</th><th>Comprado</th>
     </tr></thead><tbody>` + state.positions.map((p) => `<tr>
-      <td><b>${esc(p.symbol)}</b></td><td class="r num">${p.qty.toFixed(4)}</td>
+      <td><b>${esc(p.symbol)}</b></td><td class="r num">${fixed(p.qty, 4)}</td>
       <td class="r num">${money(p.avg_price)}</td><td class="r num">${money(p.last_price)}</td>
       <td class="r num">${money(p.value)}</td><td class="r num ${cls(p.pnl)}">${signedMoney(p.pnl)}</td>
       <td class="r num ${cls(p.pnl)}">${pct(p.pnl_pct)}</td><td>${when(p.opened_at)}</td></tr>`).join("") + `</tbody></table>`;
@@ -424,9 +428,9 @@ function renderWeights() {
   $("weights").innerHTML = `<table><thead><tr><th>ETF</th><th class="r">Peso objetivo</th><th class="r">Peso actual</th>
     <th class="r">Desviación</th><th class="r">Valor</th><th></th></tr></thead><tbody>` + state.weights.map((w) => {
     const out = Math.abs(w.drift_pct) > band;
-    return `<tr><td><b>${esc(w.symbol)}</b></td><td class="r num">${w.target_pct.toFixed(1)} %</td>
-      <td class="r num">${w.actual_pct.toFixed(1)} %</td>
-      <td class="r num ${out ? "neg" : ""}">${(w.drift_pct > 0 ? "+" : "") + w.drift_pct.toFixed(1)} pts</td>
+    return `<tr><td><b>${esc(w.symbol)}</b></td><td class="r num">${fixed(w.target_pct, 1)} %</td>
+      <td class="r num">${fixed(w.actual_pct, 1)} %</td>
+      <td class="r num ${out ? "neg" : ""}">${(w.drift_pct > 0 ? "+" : "") + fixed(w.drift_pct, 1)} pts</td>
       <td class="r num">${money(w.value)}</td>
       <td>${w.target_pct === 0 ? `<span class="chip sell">Se venderá</span>` : out && w.value > 0 ? `<span class="chip no">Fuera de banda</span>` : ""}</td></tr>`;
   }).join("") + `</tbody></table>`;
@@ -506,7 +510,7 @@ function tradesTable(trades) {
     <th class="r">Precio</th><th class="r">Importe</th><th class="r">Gan./pérd.</th><th>Motivo</th></tr></thead><tbody>` +
     trades.map((t) => `<tr><td>${when(t.ts)}</td>
       <td><span class="chip ${t.side === "BUY" ? "buy" : "sell"}">${t.side === "BUY" ? "Compra" : "Venta"}</span></td>
-      <td><b>${esc(t.symbol)}</b></td><td class="r num">${t.qty.toFixed(4)}</td><td class="r num">${money(t.price)}</td>
+      <td><b>${esc(t.symbol)}</b></td><td class="r num">${fixed(t.qty, 4)}</td><td class="r num">${money(t.price)}</td>
       <td class="r num">${money(t.amount)}</td>
       <td class="r num ${t.pnl === null ? "" : cls(t.pnl)}">${t.pnl === null ? "—" : signedMoney(t.pnl) + " (" + pct(t.pnl_pct, 1) + ")"}</td>
       <td class="wrapok">${esc(t.reason)}</td></tr>`).join("") + `</tbody></table>`;
@@ -584,7 +588,7 @@ $("btn-cycle").addEventListener("click", async () => {
   try {
     const r = await api("/api/cycle", {method: "POST"});
     const parts = [`${r.evaluated} tickers evaluados`];
-    if (r.rebalanced) parts.push("rotación mensual hecha");
+    if (r.rebalanced) parts.push(r.strategy === "allocation" ? "cartera reequilibrada" : "rotación mensual hecha");
     parts.push(r.buys.length ? `compras: ${r.buys.map((b) => esc(b.symbol)).join(", ")}` : "sin compras");
     parts.push(r.sells.length ? `ventas: ${r.sells.map((x) => esc(x.symbol)).join(", ")}` : "sin ventas");
     flash = {kind: "ok", html: "Análisis completado · " + parts.join(" · ")};
@@ -679,8 +683,8 @@ $("btn-backtest").addEventListener("click", async () => {
           <th class="r">Comprar ${esc(main.benchmark)}<br>y no tocarlo</th></tr></thead><tbody>
           ${line("Valor final", (c) => money(c.final))}
           ${line("Rentabilidad anual", (c) => pct(c.cagr_pct, 1), (c) => c.cagr_pct)}
-          ${line("Peor caída", (c) => "-" + c.max_drawdown_pct.toFixed(1) + " %")}
-          ${line("Rentabilidad por unidad de riesgo (Sharpe)", (c) => opt(c.sharpe, (v) => v.toFixed(2)))}
+          ${line("Peor caída", (c) => pct(-c.max_drawdown_pct, 1))}
+          ${line("Rentabilidad por unidad de riesgo (Sharpe)", (c) => opt(c.sharpe, (v) => fixed(v, 2)))}
           <tr><td>Ventas realizadas</td>${runs.map((r) => `<td class="r num">${r.result.trades_closed}</td>`).join("")}<td class="r num">0</td></tr>
           <tr><td>Comisiones pagadas</td>${runs.map((r) => `<td class="r num">${money(r.result.fees_paid)}</td>`).join("")}<td class="r num">—</td></tr>
         </tbody></table></div>
